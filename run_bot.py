@@ -1,53 +1,106 @@
-import zmq
-import json
+import time
+import os
+import sys
+import requests
+from dotenv import load_dotenv
+from datetime import datetime
 
-# --- KONFIGURASI KONEKSI (HARDCODED BIAR PATEN) ---
-# Ganti ini dengan IP Windows lu yang tadi
-WINDOWS_HOST = "192.168.101.13" 
-PORT = 5555
-ADDRESS = f"tcp://{WINDOWS_HOST}:{PORT}"
+# Import Module Buatan Kita
+from src.data_loader import get_market_data
+from src.indicators import calculate_rules
+from src.logger import TradeLogger
 
-# Setup ZMQ Context (Sekali di awal biar efisien)
-context = zmq.Context()
-socket = context.socket(zmq.REQ)
+# --- CONFIG ---
+load_dotenv() 
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
-# Set Timeout (PENTING: Biar gak nge-hang selamanya kalau server mati)
-socket.setsockopt(zmq.RCVTIMEO, 2000) # 2 detik timeout
-socket.setsockopt(zmq.LINGER, 0)
+# --- TELEGRAM SENDER ---
+def send_telegram(message):
+    if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
+        print("⚠️ Telegram Token/Chat ID belum diset di .env")
+        return
 
-print(f"📡 Connecting to MT5 Server at {ADDRESS}...")
-socket.connect(ADDRESS)
-
-def get_market_data():
-    """
-    Mengambil data dari Server MT5 via ZMQ.
-    """
+    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+    payload = {
+        "chat_id": TELEGRAM_CHAT_ID,
+        "text": message,
+        "parse_mode": "Markdown"
+    }
+    
     try:
-        # 1. Kirim Request
-        socket.send_json({"action": "GET_ALL_DATA"})
-        
-        # 2. Terima Reply
-        response = socket.recv_json()
-        
-        if response.get("status") == "OK":
-            return response
-        else:
-            # Kalau status ERROR dari server
-            print(f"⚠️ Server Error: {response.get('error')}")
-            return None
-
-    except zmq.Again:
-        # Timeout (Server gak bales / Mati / Firewall Blokir)
-        # Kita reconnect biar socket gak stuck
-        global socket
-        print("⚠️ Connection Timeout (Server Down/Firewall Block?) Reconnecting...")
-        socket.close()
-        socket = context.socket(zmq.REQ)
-        socket.setsockopt(zmq.RCVTIMEO, 2000)
-        socket.setsockopt(zmq.LINGER, 0)
-        socket.connect(ADDRESS)
-        return None
-        
+        requests.post(url, json=payload, timeout=5)
     except Exception as e:
-        print(f"❌ ZMQ Error: {e}")
-        return None
+        print(f"❌ Telegram Error: {e}")
+
+# --- MAIN LOOP ---
+def main():
+    print("="*40)
+    print("🚀 GOLD KILLER BOT (HYBRID MODE)")
+    print("   Analisa: MT5 (Python)")
+    print("   Eksekusi: Manual (MT4)")
+    print("="*40)
+
+    logger = TradeLogger()
+    last_signal_time = None 
+    last_print_reason = ""
+    
+    print("📡 Connecting to MT5 Server via ZMQ...")
+
+    while True:
+        try:
+            # 1. Ambil Data (Panggil fungsi dari src/data_loader.py)
+            data = get_market_data()
+            
+            if not data:
+                print("⚠️ Waiting for MT5 Server...", end="\r")
+                time.sleep(5)
+                continue
+
+            # 2. Kalkulasi Strategi
+            contract = calculate_rules(data)
+
+            # 3. Log
+            logger.log_contract(contract)
+
+            # 4. Feedback Terminal
+            current_reason = contract["reason"]
+            signal = contract["signal"]
+            ts = contract["timestamp"]
+            timestamp_str = ts.strftime("%H:%M") if ts else "--:--"
+
+            if current_reason != last_print_reason:
+                print(f"[{timestamp_str}] {signal} | {current_reason}")
+                last_print_reason = current_reason
+
+            # 5. Eksekusi Sinyal
+            if signal in ["BUY", "SELL"]:
+                candle_time = contract["timestamp"]
+                
+                if candle_time != last_signal_time:
+                    setup = contract["setup"]
+                    icon = "🟢" if signal == "BUY" else "🔴"
+                    msg = f"{icon} *SIGNAL {signal} XAUUSD*\n\n"
+                    msg += f"Entry: `{setup['entry']}`\n"
+                    msg += f"SL: `{setup['sl']}`\n"
+                    msg += f"TP: `{setup['tp']}`\n"
+                    msg += f"ATR: {setup['atr']}\n\n"
+                    msg += f"📝 *Reason:* {contract['reason']}\n"
+                    msg += f"⏰ *Time:* {timestamp_str} WIB"
+
+                    send_telegram(msg)
+                    print(f"✅ ALERT SENT: {signal} @ {setup['entry']}")
+                    
+                    last_signal_time = candle_time
+            
+            time.sleep(2)
+
+        except KeyboardInterrupt:
+            print("\n🛑 Bot Stopped")
+            sys.exit()
+        except Exception as e:
+            print(f"\n❌ Error: {e}")
+            time.sleep(5)
+
+if __name__ == "__main__":
+    main()
