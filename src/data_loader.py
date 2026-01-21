@@ -2,7 +2,6 @@ import pandas as pd
 import os
 from src.zmq_client import ZMQClient
 
-# Cari IP Windows otomatis
 def get_windows_ip():
     try:
         with open("/etc/resolv.conf", "r") as f:
@@ -11,40 +10,34 @@ def get_windows_ip():
     except: pass
     return "localhost"
 
-# Inisialisasi Client SEKALI aja (Global)
 CLIENT = ZMQClient(get_windows_ip())
 
 def get_market_data():
     response = CLIENT.request("GET_ALL_DATA")
     
     if not response or "error" in response:
+        # Bisa return None kalau market tutup atau server down
         return None
 
     try:
-        # Parsing M5 & M15
-        df_5m = pd.DataFrame(response['m5']).set_index('time')
-        df_15m = pd.DataFrame(response['m15']).set_index('time')
-        
-        # Convert Epoch ke Datetime UTC (Nanti di indicator convert ke WIB)
-        df_5m.index = pd.to_datetime(df_5m.index, unit='s')
-        df_15m.index = pd.to_datetime(df_15m.index, unit='s')
+        def parse_tf(data_list):
+            if not data_list: return pd.DataFrame()
+            df = pd.DataFrame(data_list)
+            # Patch 4: Konversi Epoch ke DateTime UTC Aware DI SINI
+            df['time'] = pd.to_datetime(df['time'], unit='s', utc=True)
+            df.set_index('time', inplace=True)
+            df.sort_index(inplace=True) # Double safety sorting
+            return df
 
-        # Parsing History (PDH/PDL dari Broker!)
-        df_d1 = pd.DataFrame(response['history']['d1'])
-        last_day = df_d1.iloc[0] # Karena server kirim urut, index 0 itu kemarin (closed)
+        df_5m = parse_tf(response['m5'])
+        df_15m = parse_tf(response['m15'])
         
-        history_ctx = {
-            "pdh": last_day['high'],
-            "pdl": last_day['low'],
-            "pdc": last_day['close']
-        }
-
         return {
             "m5": df_5m,
             "m15": df_15m,
             "tick": response['tick'],
-            "history": history_ctx
+            "history": response['history']
         }
     except Exception as e:
-        print(f"❌ Parse Error: {e}")
+        print(f"❌ Loader Error: {e}")
         return None
