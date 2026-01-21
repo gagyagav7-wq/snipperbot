@@ -31,15 +31,20 @@ def calculate_rules(data_pack):
         contract["reason"] = "Data Empty"
         return contract
 
+    # ... (kode atas sama)
     tick = data_pack['tick']
     
-    # Patch 5: Guard Tick <= 0 (Market Tutup/Error)
-    if tick.get('bid', 0) <= 0 or tick.get('ask', 0) <= 0:
-        contract["reason"] = "Market Closed (Tick 0)"
+    # [PATCH 5] Type-Safe Validation for Digits
+    # Kita cek explicit None, bukan truthy value (karena 0 itu valid)
+    point = tick.get('point')
+    digits = tick.get('digits')
+    
+    if point is None or point <= 0:
+        contract["reason"] = "CRITICAL: Invalid Point"
         return contract
-
-    if not tick.get('point') or not tick.get('digits'):
-        contract["reason"] = "Invalid Point/Digits"
+        
+    if digits is None:
+        contract["reason"] = "CRITICAL: Invalid Digits"
         return contract
 
     df_5m = data_pack['m5'].copy()
@@ -124,13 +129,20 @@ def calculate_rules(data_pack):
                   (last_5m['Close'] < prev_5m['Low']) and \
                   (last_5m['RSI'] > 30)
 
-    # 6. EXECUTION & LEVEL CHECK
-    point = tick['point']
-    digits = tick['digits']
-    def to_points(val): return val / point
+    # ... (kode strategy pattern sama) ...
 
+    # 6. EXECUTION LOGIC
+    # [PATCH 6] Include Freeze Level
     stop_level_pts = tick.get('stop_level', 0)
-    min_sl_dist_pts = max(stop_level_pts + spread + BUFFER_STOP_LEVEL, MIN_ABS_STOP_DIST)
+    freeze_level_pts = tick.get('freeze_level', 0)
+    
+    # Jarak minimal SL = StopLevel + FreezeLevel + Spread + Buffer
+    total_min_dist = stop_level_pts + freeze_level_pts + spread + BUFFER_STOP_LEVEL
+    
+    # Floor Absolut 50 points (biar gak kekecilan bgt)
+    min_sl_dist_pts = max(total_min_dist, MIN_ABS_STOP_DIST)
+
+    # ... (lanjut ke logic BUY/SELL, kode sama) ...
 
     # -- BUY --
     if bull_engulf and bull_trend:
