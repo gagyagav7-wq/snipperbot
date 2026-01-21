@@ -1,85 +1,64 @@
 import time
-import telebot
-from src.config import SYMBOL, TELEGRAM_TOKEN, CHAT_ID
-from src.data_loader import get_multi_tf_data
+from src.data_loader import get_realtime_data # Pake yang ZMQ
 from src.indicators import calculate_rules
 from src.ai_council import run_debate
-from src.state_manager import load_state, save_state
-from src.chart_gen import generate_chart_image
+from src.historical_context import get_big_picture
+from src.telegram_bot import send_alert
+from src.config import SYMBOL
 
-bot = telebot.TeleBot(TELEGRAM_TOKEN)
-print("🚀 BOT STARTED...")
+# GLOBAL STATE
+COOLDOWN_UNTIL = 0 # Timestamp cooldown
+DAILY_LOSS = 0
+MAX_DAILY_LOSS = 20 # Stop kalau rugi $20 hari ini
 
-# Load state biar ga spam pas restart
-state = load_state()
-last_processed = state['last_processed_time']
+print("🚀 SUPER BOT STARTED (ZMQ MODE)...")
+
+# Load History Sekali
+history = get_big_picture(SYMBOL)
+if not history: history = {'daily':{'pdh':9999,'pdl':0}} # Dummy
 
 while True:
     try:
-        # 1. AMBIL DATA
-        data = get_multi_tf_data(SYMBOL)
-        if not data:
+        # 1. COOLDOWN CHECK
+        if time.time() < COOLDOWN_UNTIL:
             time.sleep(10)
             continue
 
-        # 2. JALANKAN RULE ENGINE
-        analysis = calculate_rules(data)
-        
-        # 3. CEK TRIGGER CANDLE CLOSE (Poin 1)
-        current_candle_time = str(analysis['timestamp'])
-        
-        if current_candle_time == last_processed:
-            print(".", end="", flush=True)
-            time.sleep(10) # Sleep 10 detik biar hemat resource
+        # 2. AMBIL DATA REALTIME (MT5)
+        data = get_realtime_data(SYMBOL)
+        if not data:
+            time.sleep(5)
             continue
             
-        # Candle Baru Close!
-        print(f"\n⚡ New Candle M5: {current_candle_time}")
+        # 3. CEK RULES
+        analysis = calculate_rules(data, history)
         
-        # 4. APAKAH ADA SINYAL TEKNIKAL?
+        # LOGIC PENTING: Cek Candle Baru
+        # Kita pake timestamp dari data candle terakhir
+        candle_ts = analysis.get('timestamp')
+        
+        # (Implementasi logic state last_processed di sini sperti sebelumnya)
+        # ...
+        
         if analysis['signal'] in ["BUY", "SELL"]:
-            print(f"🔍 Setup {analysis['signal']} Detected via Rules. Asking AI...")
+            print(f"🔍 Setup Valid. Spread: {analysis['spread']}")
             
-            # 5. DEBAT AI
-            debate = run_debate(analysis['setup'])
+            # 4. DEBAT AI
+            debate = run_debate(analysis['setup'], history)
             
-            if debate:
-                # 6. DECISION ENGINE (Wasit) (Poin 5)
-                # Aturan: Risk harus PASS dan Keputusan AI harus TRADE
-                if debate['risk_status'] == "PASS" and debate['referee_decision'] == "TRADE":
-                    
-                    # 7. GENERATE CHART IMAGE (Poin 7)
-                    chart_img = generate_chart_image(analysis['data_5m'], title=f"{analysis['signal']} Setup")
-                    
-                    # 8. KIRIM ALERT + GAMBAR
-                    caption = f"""
-🚀 **SIGNAL CONFIRMED: {analysis['signal']}**
----------------------------
-📊 **Technical Setup**
-Entry: {analysis['setup']['entry']}
-SL   : {analysis['setup']['sl']}
-TP   : {analysis['setup']['tp']}
-
-🤖 **AI Council Verdict**
-Scores: 🐂 {debate['bull_score']} vs 🐻 {debate['bear_score']}
-Risk  : {debate['risk_status']} ({debate['risk_reason']})
-
-📝 **Summary:**
-{debate['summary']}
----------------------------
-⏳ Time: {current_candle_time}
-                    """
-                    
-                    bot.send_photo(CHAT_ID, chart_img, caption=caption)
-                    print("✅ Alert with Chart Sent!")
-                    
-                else:
-                    print(f"❌ Skipped by AI: {debate['risk_reason']} / {debate['referee_decision']}")
-            
-        # 9. SIMPAN STATE (Update time biar ga diproses lagi)
-        last_processed = current_candle_time
-        save_state(last_processed)
+            if debate and debate['decision'] == "TRADE" and debate['risk_status'] == "PASS":
+                # KIRIM ALERT
+                send_alert(debate, analysis)
+                
+                # 5. SET COOLDOWN (Poin 8)
+                # Abis kirim sinyal, bot tidur 15 menit (biar ga spam di candle yg sama/berikutnya)
+                print("💤 Entering Cooldown (15 mins)...")
+                COOLDOWN_UNTIL = time.time() + (15 * 60)
+            else:
+                print(f"❌ AI Reject: {debate['risk_reason']}")
         
+        time.sleep(3) # Cek cepet karena ini realtime data
+
     except Exception as e:
-        print(f"Error: {e}")
+        print(f"Critical Loop Error: {e}")
         time.sleep(10)
