@@ -1,45 +1,56 @@
 import google.generativeai as genai
 import json
+import re # Regex buat nyari JSON
 from src.config import GEMINI_API_KEY
 
 genai.configure(api_key=GEMINI_API_KEY)
 model = genai.GenerativeModel('gemini-1.5-flash')
 
-def run_debate(setup_data):
-    # Setup data isinya entry, sl, tp, reason dari Rule Engine
-    
+def extract_json(text):
+    # Cari teks di antara kurung kurawal terluar { ... }
+    match = re.search(r'\{.*\}', text, re.DOTALL)
+    if match:
+        return match.group(0)
+    return text
+
+def run_debate(setup_data, history_ctx):
+    # Prompt yang lebih galak
     prompt = f"""
-    ROLE: Algorithmic Trading Supervisor (XAUUSD Scalping).
+    SYSTEM: You are a JSON-ONLY Trading Engine. Do NOT write conversational text.
     
-    PROPOSED SETUP (FROM RULE ENGINE):
-    - Action: {setup_data['action']}
-    - Entry: {setup_data['entry']} | SL: {setup_data['sl']} | TP: {setup_data['tp']}
-    - Technical Reason: {setup_data['reason']}
-    - Volatility (ATR): {setup_data['atr']}
-    
+    DATA:
+    Action: {setup_data['action']} @ {setup_data['entry']}
+    Spread: {setup_data.get('spread', 'N/A')}
+    Historical PDH: {history_ctx['daily']['pdh']} (If buying near here, REJECT)
+    Historical PDL: {history_ctx['daily']['pdl']} (If selling near here, REJECT)
+
     AGENTS:
-    1. 🐂 BULL AGENT & 🐻 BEAR AGENT: Debate the technical strength.
-    2. 🛡️ RISK MANAGER: Checks if SL is too tight/wide based on ATR, or if setup looks like a liquidity trap.
-    3. ⚖️ REFEREE: Final decision.
-    
-    CRITICAL RULES:
-    - If Risk Manager Fails, Decision MUST be SKIP.
-    - If (Bull Score - Bear Score) < 20, Decision is SKIP (Weak consensus).
-    
-    OUTPUT FORMAT (JSON ONLY):
+    1. 🐺 SNIPER: Wants to trade.
+    2. 🛡️ RISK: Rejects if spread > 25, or trading into PDH/PDL support/resistance.
+    3. ⚖️ REFEREE: Final verdict.
+
+    OUTPUT FORMAT (JSON):
     {{
         "bull_score": 0-100,
         "bear_score": 0-100,
         "risk_status": "PASS" or "FAIL",
-        "risk_reason": "Short reason",
-        "referee_decision": "TRADE" or "SKIP",
-        "summary": "3 bullet points summary"
+        "risk_reason": "Reason",
+        "decision": "TRADE" or "SKIP",
+        "summary": ["Point 1", "Point 2", "Point 3"]
     }}
     """
     
     try:
         response = model.generate_content(prompt)
-        clean_text = response.text.replace("```json", "").replace("```", "").strip()
-        return json.loads(clean_text)
-    except:
+        raw_text = response.text
+        
+        # 1. Bersihin Markdown
+        clean_text = raw_text.replace("```json", "").replace("```", "").strip()
+        
+        # 2. Extract JSON murni (kalau ada teks pembuka/penutup)
+        json_str = extract_json(clean_text)
+        
+        return json.loads(json_str)
+    except Exception as e:
+        print(f"⚠️ AI Parse Error: {e} | Raw: {raw_text[:50]}...")
         return None
