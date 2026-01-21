@@ -274,8 +274,12 @@ def calculate_rules(data_pack):
             "atr": round(last_5m['ATR'], digits)
         }
     
+    # ... (Bagian atas logic BUY/SELL setup) ...
+
     else:
+        # Logika ketika tidak ada setup
         adx_val = int(last_15m['ADX']) if adx_ok else 0
+        
         if (bull_engulf or bear_engulf) and not adx_ok:
             contract["reason"] = "Pattern Found but ADX Missing"
         elif bull_engulf and not strong_bull:
@@ -285,23 +289,43 @@ def calculate_rules(data_pack):
         else:
             contract["reason"] = "No Setup"
 
-    # ... (kode logic BUY/SELL/NO SETUP sebelumnya) ...
+    # ... (Logic strategi di atas tetap sama) ...
+    
+    # ---------------------------------------------------------
+    # 👇👇 DATA EKSPOR UNTUK LOGGER (AUDIT TRAIL) 👇👇
+    # ---------------------------------------------------------
+    
+    # 1. Simpan Waktu Server & Tick (Untuk hitung Lag di Logger)
+    # Kita ambil dari meta input awal, teruskan ke output contract
+    input_meta = data_pack.get("meta", {})
+    contract["meta"]["tick_time"]     = input_meta.get("tick_time")
+    contract["meta"]["tick_time_msc"] = input_meta.get("tick_time_msc")
+    contract["meta"]["server_time"]   = input_meta.get("server_time")
 
-    # [NEW] EXPORT INDICATOR VALUES FOR LOGGER
-    # Biar logger gak perlu bongkar DataFrame lagi.
+    # 2. Simpan Data Candle Terakhir (Close Price Real)
+    try:
+        contract["meta"]["candle"] = {
+            "close": float(last_5m.get('Close', 0)),
+            "high":  float(last_5m.get('High', 0)),
+            "low":   float(last_5m.get('Low', 0)),
+            "time":  str(last_5m.name) # Timestamp candle
+        }
+    except:
+        contract["meta"]["candle"] = {}
+
+    # 3. Simpan Nilai Indikator (Desimal Presisi)
     try:
         contract["meta"]["indicators"] = {
             "rsi": round(float(last_5m.get('RSI', 0)), 2),
-            "atr": round(float(last_5m.get('ATR', 0)), 5), # 5 digit buat ATR
-            "adx": int(last_15m.get('ADX', 0)),
-            "dmp": int(last_15m.get('DMP', 0)),
-            "dmn": int(last_15m.get('DMN', 0)),
+            "atr": round(float(last_5m.get('ATR', 0)), 5),
+            # Pake float round 2 digit biar lebih akurat dari int
+            "adx": round(float(last_15m.get('ADX', 0)), 2),
+            "dmp": round(float(last_15m.get('DMP', 0)), 2),
+            "dmn": round(float(last_15m.get('DMN', 0)), 2),
             "ema50_m15": round(float(last_15m.get('EMA_50', 0)), 2),
             "ema200_m15": round(float(last_15m.get('EMA_200', 0)), 2)
         }
     except Exception:
         contract["meta"]["indicators"] = {}
-
-    return contract
 
     return contract
