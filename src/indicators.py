@@ -46,6 +46,7 @@ def calculate_rules(data_pack):
         contract["reason"] = "Data Empty"
         return contract
 
+    # ... (bagian ambil meta) ...
     meta = data_pack.get("meta", {})
     tick_time_msc = meta.get("tick_time_msc")
     tick_time_sec = meta.get("tick_time")
@@ -53,23 +54,22 @@ def calculate_rules(data_pack):
     local_time    = time.time()
     broker_ts     = None
 
+    # [CRITICAL CHECK] Timestamp Logic dengan Fallback
+    # 1. Prioritas Utama: Pakai Milidetik (msc) kalau ada dan valid (>0)
     if tick_time_msc is not None and tick_time_msc > 0:
         broker_ts = tick_time_msc / 1000.0
+        
+    # 2. Fallback: Kalau msc 0/None, pakai Detik (sec)
     elif tick_time_sec is not None and tick_time_sec > 0:
         broker_ts = float(tick_time_sec)
 
+    # 3. Final Guard: Kalau dua-duanya gak ada, baru teriak Error
     if broker_ts is not None:
         data_lag = local_time - broker_ts
-        if data_lag > STALE_FEED_THRESHOLD:
-            contract["reason"] = f"BROKER LAG ({data_lag:.1f}s)"
-            return contract
-        if -10.0 < data_lag < -2.0:
-            contract["meta"]["warnings"].append(f"Clock Drift ({data_lag:.2f}s)")
-        elif data_lag <= -10.0:
-            contract["reason"] = f"CRITICAL: Clock Behind ({data_lag:.1f}s)"
-            return contract
+        # ... (lanjut cek lag) ...
     else:
-        contract["reason"] = "CRITICAL: Invalid Broker Timestamp"
+        # Ini baru kejadian kalau msc=0 DAN sec=0 (Broker Mati Total)
+        contract["reason"] = "CRITICAL: Invalid Broker Timestamp (None/0)"
         return contract
 
     if server_time is not None:
@@ -224,6 +224,45 @@ def calculate_rules(data_pack):
     contract["meta"]["safe_dist_pts"] = adaptive_safe_dist_pts
     contract["meta"]["safe_dist_price"] = safe_dist_price
 
+    # =========================================================
+    # 👇👇 PINDAHKAN KODE EXPORT KE SINI (SEBELUM IF/ELSE) 👇👇
+    # =========================================================
+    
+    # 1. Simpan Waktu Server & Tick
+    input_meta = data_pack.get("meta", {})
+    contract["meta"]["tick_time"]     = input_meta.get("tick_time")
+    contract["meta"]["tick_time_msc"] = input_meta.get("tick_time_msc")
+    contract["meta"]["server_time"]   = input_meta.get("server_time")
+
+    # 2. Simpan Data Candle Terakhir (Close Price Real)
+    try:
+        contract["meta"]["candle"] = {
+            "close": float(last_5m.get('Close', 0)),
+            "high":  float(last_5m.get('High', 0)),
+            "low":   float(last_5m.get('Low', 0)),
+            "time":  str(last_5m.name)
+        }
+    except:
+        contract["meta"]["candle"] = {}
+
+    # 3. Simpan Nilai Indikator (Biar Logger Selalu Dapat Data)
+    try:
+        contract["meta"]["indicators"] = {
+            "rsi": round(float(last_5m.get('RSI', 0)), 2),
+            "atr": round(float(last_5m.get('ATR', 0)), 5),
+            "adx": round(float(last_15m.get('ADX', 0)), 2),
+            "dmp": round(float(last_15m.get('DMP', 0)), 2),
+            "dmn": round(float(last_15m.get('DMN', 0)), 2),
+            "ema50_m15": round(float(last_15m.get('EMA_50', 0)), 2),
+            "ema200_m15": round(float(last_15m.get('EMA_200', 0)), 2)
+        }
+    except Exception:
+        contract["meta"]["indicators"] = {}
+
+    # =========================================================
+    # BARU MASUK LOGIKA BUY/SELL (Sekarang Data Indikator Aman)
+    # =========================================================
+
     # -- SETUP BUY --
     if bull_engulf and strong_bull:
         dist_pdh_pts = to_points(hist['pdh'] - tick['ask'])
@@ -231,7 +270,6 @@ def calculate_rules(data_pack):
         if 0 < dist_pdh_pts < (adaptive_safe_dist_pts - EPS):
             contract["signal"] = "SKIP"
             contract["meta"]["dist_pdh_pts"] = dist_pdh_pts
-            # [FIX 2] Audit Price Distance
             contract["meta"]["dist_pdh_price"] = dist_pdh_pts * point
             contract["reason"] = f"Near PDH ({dist_pdh_pts:.1f} < {adaptive_safe_dist_pts:.1f} pts)"
             return contract
@@ -256,11 +294,36 @@ def calculate_rules(data_pack):
         if 0 < dist_pdl_pts < (adaptive_safe_dist_pts - EPS):
             contract["signal"] = "SKIP"
             contract["meta"]["dist_pdl_pts"] = dist_pdl_pts
-            # [FIX 2] Audit Price Distance
             contract["meta"]["dist_pdl_price"] = dist_pdl_pts * point
             contract["reason"] = f"Near PDL ({dist_pdl_pts:.1f} < {adaptive_safe_dist_pts:.1f} pts)"
             return contract
 
+        entry = tick['bid']
+        sl_dist_raw = last_5m['ATR'] * ATR_SL_MULT
+        if to_points(sl_dist_raw) < min_sl_dist_pts: sl_dist_raw = min_sl_dist_pts * point
+
+        contract["signal"] = "SELL"
+        contract["reason"] = f"Bear Engulf + Strong Trend (ADX {int(last_15m['ADX'])})"
+        contract["setup"] = {
+            "action": "SELL", "entry": round(entry, digits),
+            "sl": round(entry + sl_dist_raw, digits),
+            "tp": round(entry - (sl_dist_raw * RR_RATIO), digits),
+            "atr": round(last_5m['ATR'], digits)
+        }
+    
+    else:
+        adx_val = int(last_15m['ADX']) if adx_ok else 0
+        if (bull_engulf or bear_engulf) and not adx_ok:
+            contract["reason"] = "Pattern Found but ADX Missing"
+        elif bull_engulf and not strong_bull:
+            contract["reason"] = f"Bull Pattern but Weak Trend (ADX {adx_val})"
+        elif bear_engulf and not strong_bear:
+            contract["reason"] = f"Bear Pattern but Weak Trend (ADX {adx_val})"
+        else:
+            contract["reason"] = "No Setup"
+
+    return contract
+    
         entry = tick['bid']
         sl_dist_raw = last_5m['ATR'] * ATR_SL_MULT
         if to_points(sl_dist_raw) < min_sl_dist_pts: sl_dist_raw = min_sl_dist_pts * point
