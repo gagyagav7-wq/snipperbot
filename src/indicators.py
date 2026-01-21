@@ -1,62 +1,74 @@
 import pandas as pd
 import pandas_ta as ta
 
-def analyze_technicals(data_dict):
-    df = data_dict["m15"].copy()
-    df_h1 = data_dict["h1"].copy()
-    df_dxy = data_dict["dxy"].copy()
-
-    # --- 1. PROSES M15 (UTAMA) ---
+def calculate_single_tf(df):
+    # Fungsi pembantu biar gak ngetik ulang-ulang
+    df = df.copy()
     df['EMA_50'] = df.ta.ema(length=50)
+    df['EMA_200'] = df.ta.ema(length=200)
     df['RSI'] = df.ta.rsi(length=14)
     df['ATR'] = df.ta.atr(length=14)
+    return df
 
-    # Pola Price Action (Engulfing)
-    df['body'] = abs(df['Close'] - df['Open'])
-    df['prev_body'] = abs(df['Close'].shift(1) - df['Open'].shift(1))
-    
-    df['bullish_engulfing'] = (df['Close'] > df['Open']) & \
-                              (df['Open'] < df['Close'].shift(1)) & \
-                              (df['Close'] > df['Open'].shift(1)) & \
-                              (df['body'] > df['prev_body'])
+def analyze_technicals(data_dict):
+    # 1. Olah Semua Timeframe
+    df_1m = calculate_single_tf(data_dict["1m"])
+    df_5m = calculate_single_tf(data_dict["5m"])
+    df_15m = calculate_single_tf(data_dict["15m"])
+    df_dxy = calculate_single_tf(data_dict["dxy"])
 
-    df['bearish_engulfing'] = (df['Close'] < df['Open']) & \
-                              (df['Open'] > df['Close'].shift(1)) & \
-                              (df['Close'] < df['Open'].shift(1)) & \
-                              (df['body'] > df['prev_body'])
-
-    # SMC: Fair Value Gap (FVG) Simple
-    df['fvg_bullish'] = (df['High'].shift(2) < df['Low']) & (df['Close'] > df['Open'])
-    df['fvg_bearish'] = (df['Low'].shift(2) > df['High']) & (df['Close'] < df['Open'])
-
-    # --- 2. PROSES H1 & DXY (TREND FILTER) ---
-    df_h1['EMA_200'] = df_h1.ta.ema(length=200)
-    df_dxy['EMA_50'] = df_dxy.ta.ema(length=50)
-
-    # --- 3. RANGKUM DATA CANDLE TERAKHIR (CLOSED) ---
-    last_m15 = df.iloc[-2] # Index -2 karena -1 adalah candle running
-    last_h1 = df_h1.iloc[-2]
+    # Ambil Candle Terakhir (Closed)
+    last_1m = df_1m.iloc[-2]
+    last_5m = df_5m.iloc[-2]
+    last_15m = df_15m.iloc[-2]
     last_dxy = df_dxy.iloc[-2]
 
-    # Cek Pola
-    patterns = []
-    if last_m15['bullish_engulfing']: patterns.append("Bullish Engulfing")
-    if last_m15['bearish_engulfing']: patterns.append("Bearish Engulfing")
-    if last_m15['fvg_bullish']: patterns.append("Bullish FVG")
-    if last_m15['fvg_bearish']: patterns.append("Bearish FVG")
+    # 2. TENTUKAN TREND (THE BIAS)
+    # Trend 15m (EMA 200) adalah Raja
+    trend_15m = "BULLISH" if last_15m['Close'] > last_15m['EMA_200'] else "BEARISH"
+    
+    # 3. DETEKSI PATTERN DI 1 MENIT (SNIPER ENTRY)
+    # Kita cari Engulfing di 1m buat entry cepet
+    body = abs(last_1m['Close'] - last_1m['Open'])
+    prev_body = abs(df_1m['Close'].iloc[-3] - df_1m['Open'].iloc[-3])
+    
+    bull_engulf = (last_1m['Close'] > last_1m['Open']) & \
+                  (last_1m['Open'] < df_1m['Close'].iloc[-3]) & \
+                  (last_1m['Close'] > df_1m['Open'].iloc[-3])
+                  
+    bear_engulf = (last_1m['Close'] < last_1m['Open']) & \
+                  (last_1m['Open'] > df_1m['Close'].iloc[-3]) & \
+                  (last_1m['Close'] < df_1m['Open'].iloc[-3])
 
-    # Tentukan Trigger (Apakah perlu panggil AI?)
-    # Kita panggil AI jika ada pola ATAU RSI ekstrem
-    has_trigger = len(patterns) > 0 or last_m15['RSI'] < 30 or last_m15['RSI'] > 70
+    patterns = []
+    if bull_engulf: patterns.append("1M Bullish Engulfing")
+    if bear_engulf: patterns.append("1M Bearish Engulfing")
+
+    # 4. FILTER (SYARAT PANGGIL AI)
+    # Panggil AI cuma kalau:
+    # Ada pola di 1m DAN Arahnya sesuai sama Trend 15m (Biar gak ngelawan arus)
+    
+    has_trigger = False
+    if "1M Bullish Engulfing" in patterns and trend_15m == "BULLISH":
+        has_trigger = True
+    elif "1M Bearish Engulfing" in patterns and trend_15m == "BEARISH":
+        has_trigger = True
+    
+    # Atau kalau RSI 1m Ekstrem banget (Scalping Reversal)
+    if last_1m['RSI'] < 25 or last_1m['RSI'] > 75:
+        has_trigger = True
 
     return {
         "has_trigger": has_trigger,
-        "price": last_m15['Close'],
-        "rsi": last_m15['RSI'],
-        "atr": last_m15['ATR'],
+        "price": last_1m['Close'],
+        "rsi_1m": last_1m['RSI'],
+        "rsi_5m": last_5m['RSI'],
+        "rsi_15m": last_15m['RSI'],
+        "atr_1m": last_1m['ATR'],
         "patterns": patterns,
-        "m15_trend": "BULLISH" if last_m15['Close'] > last_m15['EMA_50'] else "BEARISH",
-        "h1_trend": "BULLISH" if last_h1['Close'] > last_h1['EMA_200'] else "BEARISH",
-        "dxy_trend": "BULLISH" if last_dxy['Close'] > last_dxy['EMA_50'] else "BEARISH",
-        "timestamp": last_m15.name
+        "trend_1m": "UP" if last_1m['Close'] > last_1m['EMA_50'] else "DOWN",
+        "trend_5m": "UP" if last_5m['Close'] > last_5m['EMA_50'] else "DOWN",
+        "trend_15m": trend_15m,
+        "dxy_trend": "UP" if last_dxy['Close'] > last_dxy['EMA_50'] else "DOWN",
+        "timestamp": last_1m.name
     }
