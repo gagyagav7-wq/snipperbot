@@ -43,8 +43,8 @@ def calculate_rules(data_pack):
         contract["reason"] = "Data Empty"
         return contract
 
-    # ... (bagian atas sama) ...
-
+    # ... (kode atas sama) ...
+    
     meta = data_pack.get("meta", {})
     server_time = meta.get("server_time")
     local_time = time.time()
@@ -55,38 +55,47 @@ def calculate_rules(data_pack):
     broker_ts = None
 
     # Logic: Prioritas MS -> Fallback ke Detik
-    if tick_time_msc and tick_time_msc > 0:
+    if tick_time_msc is not None and tick_time_msc > 0:
         broker_ts = tick_time_msc / 1000.0
-    elif tick_time_sec and tick_time_sec > 0:
+    elif tick_time_sec is not None and tick_time_sec > 0:
         broker_ts = float(tick_time_sec)
 
-    if broker_ts:
+    if broker_ts is not None:
         data_lag = local_time - broker_ts
         
         # A. Check Stale (Data Basi > 30s)
         if data_lag > STALE_FEED_THRESHOLD:
-            contract["reason"] = f"BROKER LAG ({data_lag:.2f}s) - Check MT5 Connection"
+            contract["reason"] = f"BROKER LAG ({data_lag:.1f}s) - Check MT5 Connection"
             return contract
             
         # B. Check Future Tick (Clock Drift)
-        # Zone 1: Warning (-2s s/d -10s) -> Masih boleh jalan tapi catat log
+        # Zone 1: Warning (-2s s/d -10s) -> Log Warning, tapi lanjut.
         if -10.0 < data_lag < -2.0:
-            contract["meta"]["warning"] = f"Clock Drift Detected ({data_lag:.2f}s)"
+            msg = f"Clock Drift Detected ({data_lag:.2f}s)"
+            contract["meta"]["warning"] = msg
+            print(f"⚠️ {msg}") # Print ke terminal biar ternotice
             
         # Zone 2: Kill Zone (< -10s) -> Data masa depan terlalu jauh, LOCK.
         elif data_lag <= -10.0:
-            contract["reason"] = f"CRITICAL: PC Clock Behind Broker ({data_lag:.2f}s). RESYNC TIME!"
+            contract["reason"] = f"CRITICAL: PC Clock Behind Broker ({data_lag:.1f}s). RESYNC TIME!"
             return contract
+    else:
+        # Opsional: Kalau timestamp broker 0 atau None semua
+        contract["meta"]["warning"] = "Invalid Broker Timestamp (None/0)"
 
     # [GUARD 2] System Clock Integrity (Server vs Client)
     if server_time:
-        drift = local_time - server_time
-        if abs(drift) > 5: contract["meta"]["system_drift"] = drift
-        if abs(drift) > 30:
-             contract["reason"] = f"System Clock Mismatch ({drift}s)"
+        drift = local_time - float(server_time)
+        drift_int = int(round(drift)) # Biar rapi di log (misal: 2s, bukan 2.1234s)
+        
+        if abs(drift_int) > 5: 
+            contract["meta"]["system_drift"] = drift_int
+            
+        if abs(drift_int) > 30:
+             contract["reason"] = f"System Clock Mismatch ({drift_int}s)"
              return contract
 
-    # ... (lanjut ke validasi tick, point, digits di bawahnya) ...
+    # ... (lanjut ke validasi tick point digits seperti biasa) ...
 
     # ... (lanjut ke tick validation bid/ask, copy paste yg lama) ...
     
