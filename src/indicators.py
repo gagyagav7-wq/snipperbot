@@ -156,8 +156,12 @@ def calculate_rules(data_pack):
     prev_5m  = df_5m.iloc[-2]
     last_15m = df_15m.iloc[-1]
 
-    # [FIX] Added ADX to NaN Guard to prevent crash
-    if pd.isna(last_5m['ATR']) or pd.isna(last_15m['EMA_200']) or pd.isna(last_15m['ADX']):
+    # [FIX] Added DMP/DMN to NaN Guard (Prevent Silent Fail)
+    if (pd.isna(last_5m['ATR']) or 
+        pd.isna(last_15m['EMA_200']) or 
+        pd.isna(last_15m['ADX']) or 
+        pd.isna(last_15m['DMP']) or 
+        pd.isna(last_15m['DMN'])):
         contract["reason"] = "Indicators Calculating (NaN)..."
         return contract
 
@@ -240,7 +244,7 @@ def calculate_rules(data_pack):
     safe_dist_price = max(MIN_SAFE_DIST_PRICE, min(MAX_SAFE_DIST_PRICE, raw_safe_dist_price))
     adaptive_safe_dist_pts = to_points(safe_dist_price)
     
-    # [NEW] Audit Logs
+    # Audit Logs
     contract["meta"]["safe_dist_pts"] = adaptive_safe_dist_pts
     contract["meta"]["safe_dist_price"] = safe_dist_price
 
@@ -250,6 +254,7 @@ def calculate_rules(data_pack):
         
         if 0 < dist_pdh_pts < (adaptive_safe_dist_pts - EPS):
             contract["signal"] = "SKIP"
+            contract["meta"]["dist_pdh_pts"] = dist_pdh_pts # [NEW] Log Jarak Aktual
             contract["reason"] = f"Near PDH ({dist_pdh_pts:.1f} < {adaptive_safe_dist_pts:.1f} pts)"
             return contract
 
@@ -262,7 +267,6 @@ def calculate_rules(data_pack):
         sl = entry - sl_dist_raw
         tp = entry + (sl_dist_raw * RR_RATIO)
         
-        # [FIX] Safe integer conversion
         safe_adx = int(last_15m['ADX']) if pd.notna(last_15m['ADX']) else 0
         
         contract["signal"] = "BUY"
@@ -281,6 +285,7 @@ def calculate_rules(data_pack):
         
         if 0 < dist_pdl_pts < (adaptive_safe_dist_pts - EPS):
             contract["signal"] = "SKIP"
+            contract["meta"]["dist_pdl_pts"] = dist_pdl_pts # [NEW] Log Jarak Aktual
             contract["reason"] = f"Near PDL ({dist_pdl_pts:.1f} < {adaptive_safe_dist_pts:.1f} pts)"
             return contract
 
@@ -306,7 +311,6 @@ def calculate_rules(data_pack):
         }
     
     else:
-        # [FIX] Safe Reason + NaN Guard
         safe_adx = int(last_15m['ADX']) if pd.notna(last_15m['ADX']) else 0
         
         if (bull_engulf or bear_engulf) and not adx_ok:
