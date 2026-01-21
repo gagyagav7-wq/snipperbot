@@ -27,9 +27,10 @@ ATR_SL_MULT       = 1.5
 RR_RATIO          = 2.0 
 
 # 4. STRATEGY PARAMS
-MIN_BODY_ATR     = 0.3  # Filter candle doji
-ADX_THRESHOLD    = 20   # [NEW] Minimal kekuatan trend
-SAFE_DIST_ATR    = 0.5  # [NEW] Jarak aman ke PDH/PDL (Multiplier ATR)
+MIN_BODY_ATR        = 0.3  
+ADX_THRESHOLD       = 20   
+SAFE_DIST_ATR       = 0.5  # Multiplier ATR
+MIN_SAFE_DIST_PRICE = 0.50 # [NEW] Jarak aman minimal dalam DOLLAR (bukan point)
 
 def calculate_rules(data_pack):
     
@@ -41,7 +42,8 @@ def calculate_rules(data_pack):
         "timestamp": None,
         "tick": {},
         "df_5m": pd.DataFrame(),
-        "meta": {"spread": 0, "session": False, "warning": None}
+        # [NEW] Warnings jadi List biar bisa nampung banyak warning
+        "meta": {"spread": 0, "session": False, "warnings": []}
     }
 
     # ==========================================
@@ -70,7 +72,7 @@ def calculate_rules(data_pack):
             return contract
         if -10.0 < data_lag < -2.0:
             msg = f"Clock Drift Detected ({data_lag:.2f}s)"
-            contract["meta"]["warning"] = msg
+            contract["meta"]["warnings"].append(msg)
             print(f"⚠️ {msg}") 
         elif data_lag <= -10.0:
             contract["reason"] = f"CRITICAL: PC Clock Behind Broker ({data_lag:.1f}s). RESYNC TIME!"
@@ -129,13 +131,25 @@ def calculate_rules(data_pack):
     # M15 Indicators
     df_15m['EMA_50']  = df_15m.ta.ema(length=50)
     df_15m['EMA_200'] = df_15m.ta.ema(length=200)
-    # [NEW] ADX Filter (Trend Strength)
+    
+    # [NEW] ADX + DMP/DMN Extraction
+    # pandas_ta return: ADX_14, DMP_14, DMN_14
     adx_df = df_15m.ta.adx(length=14)
+    
+    df_15m['ADX'] = 0
+    df_15m['DMP'] = 0
+    df_15m['DMN'] = 0
+
     if adx_df is not None and not adx_df.empty:
-        # Pandas TA biasanya return 3 kolom (ADX, DMP, DMN). Kita ambil kolom pertama (ADX)
-        df_15m['ADX'] = adx_df.iloc[:, 0] 
-    else:
-        df_15m['ADX'] = 0
+        # Cari kolom dinamis
+        col_adx = [c for c in adx_df.columns if c.startswith("ADX")]
+        col_dmp = [c for c in adx_df.columns if c.startswith("DMP")]
+        col_dmn = [c for c in adx_df.columns if c.startswith("DMN")]
+        
+        if col_adx and col_dmp and col_dmn:
+            df_15m['ADX'] = adx_df[col_adx[0]]
+            df_15m['DMP'] = adx_df[col_dmp[0]]
+            df_15m['DMN'] = adx_df[col_dmn[0]]
 
     last_5m  = df_5m.iloc[-1]
     prev_5m  = df_5m.iloc[-2]
@@ -149,13 +163,7 @@ def calculate_rules(data_pack):
     # 🕒 4. CEK SESI & WAKTU
     # ==========================================
     try:
-        ts = last_5m.name
-        if isinstance(ts, (int, float)):
-            utc_time = pd.to_datetime(ts, unit='s', utc=True)
-        else:
-            utc_time = pd.to_datetime(ts).tz_localize('UTC') if ts.tzinfo is None else ts
-
-        wib_time = utc_time.astimezone(WIB)
+        wib_time = last_5m.name.tz_convert(WIB)
         contract["timestamp"] = wib_time
         
         if not (SESSION_START <= wib_time.hour < SESSION_END):
@@ -187,19 +195,21 @@ def calculate_rules(data_pack):
         return contract
 
     # ==========================================
-    # 📈 6. LOGIKA STRATEGI (Trend + Pattern + ADX)
+    # 📈 6. LOGIKA STRATEGI (Ultimate Trend Check)
     # ==========================================
 
-    # A. Identifikasi Trend (Strong Trend Only) + ADX CHECK
-    is_bull_trend = (last_15m['Close'] > last_15m['EMA_50']) and \
-                    (last_15m['EMA_50'] > last_15m['EMA_200']) and \
-                    (last_15m['ADX'] > ADX_THRESHOLD) # [NEW] Trend harus kuat
+    # A. Trend Logic: EMA + ADX + DIRECTION (DMP/DMN)
+    strong_bull = (last_15m['Close'] > last_15m['EMA_50']) and \
+                  (last_15m['EMA_50'] > last_15m['EMA_200']) and \
+                  (last_15m['ADX'] > ADX_THRESHOLD) and \
+                  (last_15m['DMP'] > last_15m['DMN']) # [NEW] Uptrend Confirm
 
-    is_bear_trend = (last_15m['Close'] < last_15m['EMA_50']) and \
-                    (last_15m['EMA_50'] < last_15m['EMA_200']) and \
-                    (last_15m['ADX'] > ADX_THRESHOLD) # [NEW] Trend harus kuat
+    strong_bear = (last_15m['Close'] < last_15m['EMA_50']) and \
+                  (last_15m['EMA_50'] < last_15m['EMA_200']) and \
+                  (last_15m['ADX'] > ADX_THRESHOLD) and \
+                  (last_15m['DMN'] > last_15m['DMP']) # [NEW] Downtrend Confirm
 
-    # B. Identifikasi Pattern (Engulfing Strict)
+    # B. Pattern Check
     body     = abs(last_5m['Close'] - last_5m['Open'])
     min_body = last_5m['ATR'] * MIN_BODY_ATR
     
@@ -218,7 +228,7 @@ def calculate_rules(data_pack):
                   (last_5m['RSI'] > 30)
 
     # ==========================================
-    # 🚀 7. EKSEKUSI & VALIDASI LEVEL (ADAPTIVE)
+    # 🚀 7. EKSEKUSI & LEVEL (Price-Aware)
     # ==========================================
     
     def to_points(val): return val / point
@@ -227,16 +237,17 @@ def calculate_rules(data_pack):
     min_dist_req    = stop_level + freeze_level + spread + BUFFER_STOP_LEVEL
     min_sl_dist_pts = max(min_dist_req, MIN_ABS_STOP_DIST)
 
-    # [NEW] Hitung Jarak Aman PDH/PDL secara Adaptif (ATR Based)
-    # Kalau ATR 2.0 (200 point), safe dist jadi 100 point.
-    # Kalau ATR 5.0 (500 point), safe dist jadi 250 point.
-    adaptive_safe_dist_pts = to_points(last_5m['ATR'] * SAFE_DIST_ATR)
+    # [NEW] Adaptive Safe Distance dengan PRICE FLOOR
+    # Konversi Price (0.50) ke Points sesuai broker digit
+    min_safe_pts = MIN_SAFE_DIST_PRICE / point 
+    
+    raw_safe_dist = to_points(last_5m['ATR'] * SAFE_DIST_ATR)
+    adaptive_safe_dist_pts = max(raw_safe_dist, min_safe_pts)
 
     # --- SETUP BUY ---
-    if bull_engulf and is_bull_trend:
+    if bull_engulf and strong_bull:
         dist_pdh_pts = to_points(hist['pdh'] - tick['ask'])
         
-        # Cek Jarak PDH Adaptif
         if 0 < dist_pdh_pts < (adaptive_safe_dist_pts - EPS):
             contract["signal"] = "SKIP"
             contract["reason"] = f"Near PDH ({int(dist_pdh_pts)} < {int(adaptive_safe_dist_pts)} pts)"
@@ -262,10 +273,9 @@ def calculate_rules(data_pack):
         }
 
     # --- SETUP SELL ---
-    elif bear_engulf and is_bear_trend:
+    elif bear_engulf and strong_bear:
         dist_pdl_pts = to_points(tick['bid'] - hist['pdl'])
         
-        # Cek Jarak PDL Adaptif
         if 0 < dist_pdl_pts < (adaptive_safe_dist_pts - EPS):
             contract["signal"] = "SKIP"
             contract["reason"] = f"Near PDL ({int(dist_pdl_pts)} < {int(adaptive_safe_dist_pts)} pts)"
@@ -291,11 +301,11 @@ def calculate_rules(data_pack):
         }
     
     else:
-        # Tambahan Info Kenapa Gak Setup (Optional, buat debugging)
-        if bull_engulf and not is_bull_trend:
-            contract["reason"] = f"Bull Pattern but Weak Trend (ADX {int(last_15m['ADX'])})"
-        elif bear_engulf and not is_bear_trend:
-            contract["reason"] = f"Bear Pattern but Weak Trend (ADX {int(last_15m['ADX'])})"
+        adx_val = int(last_15m['ADX']) if not pd.isna(last_15m['ADX']) else 0
+        if bull_engulf and not strong_bull:
+            contract["reason"] = f"Bull Pattern but Weak/Mix Trend (ADX {adx_val})"
+        elif bear_engulf and not strong_bear:
+            contract["reason"] = f"Bear Pattern but Weak/Mix Trend (ADX {adx_val})"
         else:
             contract["reason"] = "No Setup"
 
