@@ -1,7 +1,8 @@
-yfinance
 pandas
 pandas_ta
 google-generativeai
 pyTelegramBotAPI
 python-dotenv
-numpy
+mplfinance
+pyzmq
+pytz
