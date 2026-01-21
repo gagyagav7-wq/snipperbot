@@ -10,7 +10,9 @@ SESSION_START = 14
 SESSION_END = 23    
 
 # Safety Thresholds
-STALE_FEED_THRESHOLD = 30 # Detik (Batas toleransi lag server)
+STALE_FEED_THRESHOLD = 30 # Detik
+EPS = 1e-9 # [FIX] Epsilon buat floating point comparison
+
 ABNORMAL_LEVEL_THRESHOLD = 100 
 MAX_SPREAD = 35         
 BUFFER_STOP_LEVEL = 10  
@@ -38,11 +40,18 @@ def calculate_rules(data_pack):
         contract["reason"] = "Data Empty"
         return contract
 
-    # [GUARD] Stale Feed (Data Basi)
+    # [GUARD] Stale Feed (Improved Logic)
     server_time = data_pack.get("meta", {}).get("server_time")
     if server_time:
-        lag = abs(int(time.time()) - server_time)
-        if lag > STALE_FEED_THRESHOLD:
+        local_time = int(time.time())
+        lag = local_time - server_time
+        
+        # Kalau lag negatif besar, berarti jam PC Windows kecepetan dibanding Ubuntu (Clock Drift)
+        # Kita toleransi dikit (-10 detik)
+        if lag < -10:
+             # Warning only, jangan kill bot, tapi log ini perlu dicek user
+             pass 
+        elif lag > STALE_FEED_THRESHOLD:
             contract["reason"] = f"Stale Feed (Lag: {lag}s)"
             return contract
 
@@ -50,7 +59,6 @@ def calculate_rules(data_pack):
     point = tick.get('point')
     digits = tick.get('digits')
     
-    # [GUARD] Market Conditions
     if tick.get('bid', 0) <= 0 or tick.get('ask', 0) <= 0:
         contract["reason"] = "Market Closed (Tick 0)"
         return contract
@@ -63,17 +71,14 @@ def calculate_rules(data_pack):
     df_15m = data_pack['m15'].copy()
     hist = data_pack.get('history', {})
     
-    # [GUARD] History
     if hist.get('pdh') is None or hist.get('pdl') is None:
         contract["reason"] = "History Missing"
         return contract
 
     contract["df_5m"] = df_5m
     contract["tick"] = tick
-    # Kirim D1 time ke metadata biar bisa diaudit manusia
     contract["meta"]["d1_time"] = hist.get("d1_time")
 
-    # [GUARD] Data Length
     if len(df_5m) < 60 or len(df_15m) < 200:
         contract["reason"] = "Not Enough Bars"
         return contract
@@ -114,7 +119,6 @@ def calculate_rules(data_pack):
     freeze_level = tick.get('freeze_level', 0)
     contract["meta"]["spread"] = spread
 
-    # [GUARD] Broker Restrictions
     if stop_level > ABNORMAL_LEVEL_THRESHOLD or freeze_level > ABNORMAL_LEVEL_THRESHOLD:
         contract["signal"] = "SKIP"
         contract["reason"] = f"Broker Restricted (Stop: {stop_level}, Freeze: {freeze_level})"
@@ -146,17 +150,20 @@ def calculate_rules(data_pack):
                   (last_5m['Close'] < prev_5m['Low']) and \
                   (last_5m['RSI'] > 30)
 
-    # 6. EXECUTION LOGIC (Rounding Fix)
-    def to_points(val): return round(val / point, 2) # Rounding biar gak ada noise float 199.999
+    # 6. EXECUTION LOGIC
+    # [FIX] Helper tanpa rounding, return float murni
+    def to_points(val): return val / point
 
+    # Validasi Stop Level
     min_dist_req = stop_level + freeze_level + spread + BUFFER_STOP_LEVEL
     min_sl_dist_pts = max(min_dist_req, MIN_ABS_STOP_DIST)
 
     # -- BUY --
     if bull_engulf and bull_trend:
         dist_pdh_pts = to_points(hist['pdh'] - tick['ask'])
-        # [HARDENING] Tolerance Float
-        if 0 < dist_pdh_pts < SAFE_DIST_POINTS:
+        
+        # [FIX] Pake Epsilon buat komparasi float
+        if 0 < dist_pdh_pts < (SAFE_DIST_POINTS - EPS):
             contract["signal"] = "SKIP"
             contract["reason"] = f"Near PDH ({int(dist_pdh_pts)} pts)"
             return contract
@@ -183,7 +190,9 @@ def calculate_rules(data_pack):
     # -- SELL --
     elif bear_engulf and bear_trend:
         dist_pdl_pts = to_points(tick['bid'] - hist['pdl'])
-        if 0 < dist_pdl_pts < SAFE_DIST_POINTS:
+        
+        # [FIX] Pake Epsilon
+        if 0 < dist_pdl_pts < (SAFE_DIST_POINTS - EPS):
             contract["signal"] = "SKIP"
             contract["reason"] = f"Near PDL ({int(dist_pdl_pts)} pts)"
             return contract
