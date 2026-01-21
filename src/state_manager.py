@@ -1,11 +1,12 @@
 import json
 import os
+import time
 from datetime import datetime, timezone
 
 FILE_PATH = "signal_state.json"
 
-def save_state_atomic(active, sig_type=None, sl=0, tp=0, entry=0, reason="", opened_at_ts=0):
-    """Save state Atomic dengan parameter yang jelas (Named Args)"""
+def save_state_atomic(active, sig_type=None, sl=0, tp=0, entry=0, reason="", candle_ts=0):
+    """Save state Atomic dengan Wall-Clock Time untuk Expiry yang aman"""
     state = {
         "active": active,
         "type": sig_type,
@@ -13,7 +14,8 @@ def save_state_atomic(active, sig_type=None, sl=0, tp=0, entry=0, reason="", ope
         "sl": float(sl),
         "tp": float(tp),
         "reason": str(reason),
-        "opened_at_candle_ts": int(opened_at_ts),
+        "opened_at_candle_ts": int(candle_ts),
+        "opened_at_wall_ts": int(time.time()), # Jam PC (Anti broker jump)
         "updated_at": datetime.now(timezone.utc).isoformat()
     }
     temp_file = FILE_PATH + ".tmp"
@@ -23,20 +25,22 @@ def save_state_atomic(active, sig_type=None, sl=0, tp=0, entry=0, reason="", ope
         os.fsync(f.fileno())
     os.replace(temp_file, FILE_PATH)
 
-def check_signal_status(high, low, current_ts):
-    if not os.path.exists(FILE_PATH): return None
+def check_signal_status(high, low, current_candle_ts):
+    """Cek status dengan return string eksplisit (Anti Ambigu)"""
+    if not os.path.exists(FILE_PATH): return "NONE"
     try:
         with open(FILE_PATH, "r") as f:
             state = json.load(f)
-    except: return None
+    except: return "NONE"
 
-    if not state.get("active") or not state.get("sl"): return None
+    if not state.get("active"): return "NONE"
 
-    # Expiry 4 jam (14400 detik)
-    if current_ts - state["opened_at_candle_ts"] > 14400:
+    # --- 1. DOUBLE-CLOCK EXPIRY (4 Jam / 14400 Detik) ---
+    # Cek berdasarkan Jam PC (Wall time) lebih aman dari broker jump
+    if int(time.time()) - state.get("opened_at_wall_ts", 0) > 14400:
         return "EXPIRED"
 
-    # Hit Detection
+    # --- 2. HIT DETECTION ---
     if state["type"] == "BUY":
         if high >= state["tp"]: return "TP_HIT"
         if low <= state["sl"]: return "SL_HIT"
