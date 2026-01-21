@@ -3,17 +3,21 @@ import pandas_ta as ta
 import pytz
 from datetime import datetime
 
-# --- KONFIGURASI ---
+# --- KONFIGURASI STRATEGI ---
 WIB = pytz.timezone('Asia/Jakarta')
 SESSION_START = 14  
 SESSION_END = 23    
+
 MAX_SPREAD = 35         
 SAFE_DIST_POINTS = 200  
 ATR_SL_MULT = 1.5       
 RR_RATIO = 2.0          
 MIN_BODY_ATR = 0.3      
+
+# Risk Config
 BUFFER_STOP_LEVEL = 10  
 MIN_ABS_STOP_DIST = 50 
+ABNORMAL_LEVEL_THRESHOLD = 100 # Kalau Freeze/Stop Level > 100 points, market lagi gila. SKIP.
 
 def calculate_rules(data_pack):
     contract = {
@@ -31,27 +35,28 @@ def calculate_rules(data_pack):
         contract["reason"] = "Data Empty"
         return contract
 
-    # ... (kode atas sama)
     tick = data_pack['tick']
-    
-    # [PATCH 5] Type-Safe Validation for Digits
-    # Kita cek explicit None, bukan truthy value (karena 0 itu valid)
     point = tick.get('point')
     digits = tick.get('digits')
     
+    # [GUARD] Invalid Tick Data / Market Glitch
+    if tick.get('bid', 0) <= 0 or tick.get('ask', 0) <= 0:
+        contract["reason"] = "Market Closed (Tick 0)"
+        return contract
+
     if point is None or point <= 0:
-        contract["reason"] = "CRITICAL: Invalid Point"
+        contract["reason"] = "Invalid Point Value"
         return contract
         
-    if digits is None:
-        contract["reason"] = "CRITICAL: Invalid Digits"
+    if digits is None or digits < 1: # XAUUSD minimal digits 2
+        contract["reason"] = "Invalid Digits"
         return contract
 
     df_5m = data_pack['m5'].copy()
     df_15m = data_pack['m15'].copy()
     hist = data_pack.get('history', {})
     
-    # Guard Missing History Keys
+    # Guard History
     if hist.get('pdh') is None or hist.get('pdl') is None:
         contract["reason"] = "History Missing"
         return contract
@@ -76,16 +81,19 @@ def calculate_rules(data_pack):
     prev_5m = df_5m.iloc[-2]
     last_15m = df_15m.iloc[-1]
 
-    # Patch 6: Guard Indicator NaN (EMA 200 butuh data banyak)
     if pd.isna(last_5m['ATR']) or pd.isna(last_15m['EMA_200']):
         contract["reason"] = "Indicators Loading..."
         return contract
 
-    # 3. TIMEZONE (Simplified & Robust)
+    # 3. TIMEZONE (Epoch UTC -> WIB)
     try:
-        # Index sudah UTC Aware dari data_loader.py, tinggal convert
         ts = last_5m.name
-        wib_time = ts.tz_convert(WIB)
+        if isinstance(ts, (int, float)):
+            utc_time = pd.to_datetime(ts, unit='s', utc=True)
+        else:
+            utc_time = pd.to_datetime(ts).tz_localize('UTC') if ts.tzinfo is None else ts
+
+        wib_time = utc_time.astimezone(WIB)
         contract["timestamp"] = wib_time
         
         if not (SESSION_START <= wib_time.hour < SESSION_END):
@@ -97,24 +105,31 @@ def calculate_rules(data_pack):
         contract["reason"] = f"Time Error: {e}"
         return contract
 
-    # 4. SPREAD FILTER
+    # 4. MARKET CONDITION FILTERS
     spread = tick.get('spread', 999)
+    stop_level = tick.get('stop_level', 0)
+    freeze_level = tick.get('freeze_level', 0)
+    
     contract["meta"]["spread"] = spread
+
+    # [GUARD] Abnormal Broker Conditions
+    if stop_level > ABNORMAL_LEVEL_THRESHOLD or freeze_level > ABNORMAL_LEVEL_THRESHOLD:
+        contract["signal"] = "SKIP"
+        contract["reason"] = f"Broker Restriction High (Stop: {stop_level}, Freeze: {freeze_level})"
+        return contract
+
     if spread > MAX_SPREAD:
         contract["signal"] = "SKIP"
         contract["reason"] = f"High Spread: {spread}"
         return contract
 
-    # 5. STRATEGY (Strong Trend + Confirm Close)
-    # Trend M15
+    # 5. STRATEGY (Strong Trend + Confirm)
     bull_trend = (last_15m['Close'] > last_15m['EMA_50']) and (last_15m['EMA_50'] > last_15m['EMA_200'])
     bear_trend = (last_15m['Close'] < last_15m['EMA_50']) and (last_15m['EMA_50'] < last_15m['EMA_200'])
 
-    # Pattern M5
     body = abs(last_5m['Close'] - last_5m['Open'])
     min_body = last_5m['ATR'] * MIN_BODY_ATR
     
-    # Patch 7: RSI Filter Ditambahkan Kembali (Optional tapi bagus)
     bull_engulf = (last_5m['Close'] > last_5m['Open']) and \
                   (last_5m['Open'] < prev_5m['Close']) and \
                   (last_5m['Close'] > prev_5m['Open']) and \
@@ -129,20 +144,12 @@ def calculate_rules(data_pack):
                   (last_5m['Close'] < prev_5m['Low']) and \
                   (last_5m['RSI'] > 30)
 
-    # ... (kode strategy pattern sama) ...
-
     # 6. EXECUTION LOGIC
-    # [PATCH 6] Include Freeze Level
-    stop_level_pts = tick.get('stop_level', 0)
-    freeze_level_pts = tick.get('freeze_level', 0)
-    
-    # Jarak minimal SL = StopLevel + FreezeLevel + Spread + Buffer
-    total_min_dist = stop_level_pts + freeze_level_pts + spread + BUFFER_STOP_LEVEL
-    
-    # Floor Absolut 50 points (biar gak kekecilan bgt)
-    min_sl_dist_pts = max(total_min_dist, MIN_ABS_STOP_DIST)
+    def to_points(val): return val / point
 
-    # ... (lanjut ke logic BUY/SELL, kode sama) ...
+    # Minimum SL Distance = StopLvl + FreezeLvl + Spread + Buffer
+    min_dist_req = stop_level + freeze_level + spread + BUFFER_STOP_LEVEL
+    min_sl_dist_pts = max(min_dist_req, MIN_ABS_STOP_DIST)
 
     # -- BUY --
     if bull_engulf and bull_trend:
@@ -155,6 +162,7 @@ def calculate_rules(data_pack):
         entry = tick['ask']
         sl_dist_raw = last_5m['ATR'] * ATR_SL_MULT
         
+        # SL Guard: Lebarin SL kalau kekecilan
         if to_points(sl_dist_raw) < min_sl_dist_pts:
             sl_dist_raw = min_sl_dist_pts * point
         
@@ -182,6 +190,7 @@ def calculate_rules(data_pack):
         entry = tick['bid']
         sl_dist_raw = last_5m['ATR'] * ATR_SL_MULT
         
+        # SL Guard
         if to_points(sl_dist_raw) < min_sl_dist_pts:
             sl_dist_raw = min_sl_dist_pts * point
 
