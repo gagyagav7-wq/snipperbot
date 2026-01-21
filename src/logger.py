@@ -7,80 +7,85 @@ class TradeLogger:
         self.log_dir = "logs"
         self.filename_prefix = filename_prefix
         
+        # Buat folder logs kalau belum ada
         if not os.path.exists(self.log_dir):
             os.makedirs(self.log_dir)
             
-        # Header CSV
+        # Header CSV Lengkap (Audit Trail)
         self.fields = [
-            "timestamp", "signal", "reason", "price_close", 
-            "spread", "adx", "rsi", "safe_dist_price", 
-            "skip_dist_price", "stop_level", "warnings"
+            "timestamp_wib",    # Waktu Candle
+            "signal",           # BUY/SELL/SKIP/NO
+            "reason",           # Alasan lengkap
+            "price_close",      # Harga Close M5
+            "spread",           # Spread Broker
+            "rsi", "adx",       # Indikator Utama
+            "safe_dist_pts",    # Jarak Aman (Points)
+            "actual_dist_pts",  # Jarak Aktual ke PDH/PDL
+            "stop_level",       # Broker Stop Level
+            "freeze_level",     # Broker Freeze Level
+            "tick_lag",         # Latency Broker
+            "warnings"          # Clock drift, dll
         ]
-        self.current_date = None
-        self.csv_file = None
 
     def _get_file_path(self):
-        # Rotasi log per hari
+        # Generate nama file berdasarkan tanggal HARI INI
         today = datetime.now().strftime("%Y-%m-%d")
-        if today != self.current_date:
-            self.current_date = today
-            return os.path.join(self.log_dir, f"{self.filename_prefix}_{today}.csv")
-        return self.csv_file
+        return os.path.join(self.log_dir, f"{self.filename_prefix}_{today}.csv")
 
     def log_contract(self, contract):
-        # Hanya log jika data valid (bukan init/empty)
-        if not contract or contract.get("reason") in ["Data Empty", "Initializing..."]:
+        # 1. Filter Log: Jangan catat kalau masih Initializing atau Data Kosong
+        if not contract or contract.get("reason") in ["Initializing...", "Data Empty"]:
             return
 
         file_path = self._get_file_path()
         file_exists = os.path.isfile(file_path)
 
-        # Extract Data Penting
+        # 2. Extract Data dengan Aman (Pake .get biar gak crash)
         meta = contract.get("meta", {})
         tick = contract.get("tick", {})
-        setup = contract.get("setup", {})
+        inds = meta.get("indicators", {}) # Ambil dari update indicators.py tadi
         
-        # Ambil indikator terakhir (agak tricky karena ada di DataFrame)
-        df = contract.get("df_5m")
-        df_15 = pd.DataFrame() # Placeholder kalau structure beda, tapi logic aman
-        
-        adx_val = 0
-        rsi_val = 0
-        close_val = 0
-        
-        try:
-            if not df.empty:
-                last_row = df.iloc[-1]
-                close_val = last_row.get('Close', 0)
-                rsi_val = round(last_row.get('RSI', 0), 2)
-                # ADX ada di dataframe tapi logic kita hitung di indicators.py
-                # Kita ambil dari reason text kalau terpaksa, atau modif indikator return DF
-                # Utk simplifikasi, kita catat yg ada di contract meta dulu
-        except: pass
+        # Ambil Timestamp Candle (Lebih akurat dari waktu PC)
+        ts_obj = contract.get("timestamp")
+        ts_str = ts_obj.strftime("%Y-%m-%d %H:%M:%S") if ts_obj else datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-        # Cek Jarak Skip (Price)
-        skip_dist = meta.get("dist_pdh_price") or meta.get("dist_pdl_price") or 0
-        if skip_dist: skip_dist = round(skip_dist, 2)
+        # Cek Jarak Aktual (PDH atau PDL)
+        dist_actual = meta.get("dist_pdh_pts") or meta.get("dist_pdl_pts") or 0
+        if dist_actual: dist_actual = round(dist_actual, 1)
 
-        safe_dist = meta.get("safe_dist_price", 0)
-        if safe_dist: safe_dist = round(safe_dist, 2)
+        # Cek Jarak Aman
+        dist_safe = meta.get("safe_dist_pts", 0)
+        if dist_safe: dist_safe = round(dist_safe, 1)
 
+        # Hitung Tick Lag (Audit Latency)
+        tick_time = meta.get("tick_time", 0)
+        lag = 0
+        if tick_time:
+            lag = round(datetime.now().timestamp() - tick_time, 2)
+
+        # 3. Susun Baris Data
         row = {
-            "timestamp": datetime.now().strftime("%H:%M:%S"),
+            "timestamp_wib": ts_str,
             "signal": contract.get("signal"),
             "reason": contract.get("reason"),
-            "price_close": close_val,
+            "price_close": contract.get("tick", {}).get("bid", 0), # Close price approx (Bid)
             "spread": meta.get("spread"),
-            "adx": "N/A", # Perlu pass DF 15m kalau mau log ADX detail
-            "rsi": rsi_val,
-            "safe_dist_price": safe_dist,
-            "skip_dist_price": skip_dist,
+            "rsi": inds.get("rsi", "N/A"),
+            "adx": inds.get("adx", "N/A"),
+            "safe_dist_pts": dist_safe,
+            "actual_dist_pts": dist_actual,
             "stop_level": tick.get("stop_level"),
-            "warnings": ";".join(meta.get("warnings", []))
+            "freeze_level": tick.get("freeze_level"),
+            "tick_lag": lag,
+            "warnings": "; ".join(meta.get("warnings", []))
         }
 
-        with open(file_path, mode='a', newline='') as f:
-            writer = csv.DictWriter(f, fieldnames=self.fields)
-            if not file_exists:
-                writer.writeheader()
-            writer.writerow(row)
+        # 4. Tulis ke CSV
+        try:
+            with open(file_path, mode='a', newline='', encoding='utf-8') as f:
+                writer = csv.DictWriter(f, fieldnames=self.fields)
+                if not file_exists:
+                    writer.writeheader() # Tulis header kalau file baru
+                writer.writerow(row)
+        except Exception as e:
+            print(f"❌ Logger Error: {e}")
