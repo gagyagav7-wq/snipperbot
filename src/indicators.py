@@ -285,4 +285,23 @@ def calculate_rules(data_pack):
         else:
             contract["reason"] = "No Setup"
 
+    # ... (kode logic BUY/SELL/NO SETUP sebelumnya) ...
+
+    # [NEW] EXPORT INDICATOR VALUES FOR LOGGER
+    # Biar logger gak perlu bongkar DataFrame lagi.
+    try:
+        contract["meta"]["indicators"] = {
+            "rsi": round(float(last_5m.get('RSI', 0)), 2),
+            "atr": round(float(last_5m.get('ATR', 0)), 5), # 5 digit buat ATR
+            "adx": int(last_15m.get('ADX', 0)),
+            "dmp": int(last_15m.get('DMP', 0)),
+            "dmn": int(last_15m.get('DMN', 0)),
+            "ema50_m15": round(float(last_15m.get('EMA_50', 0)), 2),
+            "ema200_m15": round(float(last_15m.get('EMA_200', 0)), 2)
+        }
+    except Exception:
+        contract["meta"]["indicators"] = {}
+
+    return contract
+
     return contract
