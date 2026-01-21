@@ -10,8 +10,9 @@ SESSION_START = 14
 SESSION_END = 23    
 
 # Safety Thresholds
-STALE_FEED_THRESHOLD = 30 # Detik
-EPS = 1e-9 # [FIX] Epsilon buat floating point comparison
+STALE_FEED_THRESHOLD = 30  # Detik (Data Broker Basi)
+CLOCK_DRIFT_LIMIT = 30     # Detik (Beda jam Windows vs Ubuntu)
+EPS = 1e-9 
 
 ABNORMAL_LEVEL_THRESHOLD = 100 
 MAX_SPREAD = 35         
@@ -40,20 +41,29 @@ def calculate_rules(data_pack):
         contract["reason"] = "Data Empty"
         return contract
 
-    # [GUARD] Stale Feed (Improved Logic)
-    server_time = data_pack.get("meta", {}).get("server_time")
-    if server_time:
-        local_time = int(time.time())
-        lag = local_time - server_time
-        
-        # Kalau lag negatif besar, berarti jam PC Windows kecepetan dibanding Ubuntu (Clock Drift)
-        # Kita toleransi dikit (-10 detik)
-        if lag < -10:
-             # Warning only, jangan kill bot, tapi log ini perlu dicek user
-             pass 
-        elif lag > STALE_FEED_THRESHOLD:
-            contract["reason"] = f"Stale Feed (Lag: {lag}s)"
+    meta = data_pack.get("meta", {})
+    tick_time = meta.get("tick_time")
+    server_time = meta.get("server_time")
+    local_time = int(time.time())
+
+    # [GUARD 1] Real Stale Feed Check (Broker Connection)
+    # Kalau tick time udah lewat 30 detik dari sekarang, MT5 putus!
+    if tick_time:
+        data_lag = local_time - tick_time
+        if data_lag > STALE_FEED_THRESHOLD:
+            contract["reason"] = f"BROKER DISCONNECT? (Tick Lag: {data_lag}s)"
             return contract
+    
+    # [GUARD 2] Clock Drift Check (System Integrity)
+    # Kalau jam Ubuntu kecepetan/telat jauh dari jam Windows, logic Close Candle bisa kacau.
+    if server_time:
+        drift = local_time - server_time
+        contract["meta"]["clock_drift"] = drift
+        
+        # Kalau drift terlalu ekstrem (misal beda > 30 detik), Lock Bot.
+        if abs(drift) > CLOCK_DRIFT_LIMIT:
+             contract["reason"] = f"CRITICAL: Clock Drift Too High ({drift}s)"
+             return contract
 
     tick = data_pack['tick']
     point = tick.get('point')
@@ -101,7 +111,14 @@ def calculate_rules(data_pack):
 
     # 3. TIMEZONE
     try:
-        wib_time = last_5m.name.tz_convert(WIB)
+        ts = last_5m.name
+        # UTC Aware conversion
+        if isinstance(ts, (int, float)):
+            utc_time = pd.to_datetime(ts, unit='s', utc=True)
+        else:
+            utc_time = pd.to_datetime(ts).tz_localize('UTC') if ts.tzinfo is None else ts
+
+        wib_time = utc_time.astimezone(WIB)
         contract["timestamp"] = wib_time
         
         if not (SESSION_START <= wib_time.hour < SESSION_END):
@@ -151,7 +168,6 @@ def calculate_rules(data_pack):
                   (last_5m['RSI'] > 30)
 
     # 6. EXECUTION LOGIC
-    # [FIX] Helper tanpa rounding, return float murni
     def to_points(val): return val / point
 
     # Validasi Stop Level
@@ -162,7 +178,6 @@ def calculate_rules(data_pack):
     if bull_engulf and bull_trend:
         dist_pdh_pts = to_points(hist['pdh'] - tick['ask'])
         
-        # [FIX] Pake Epsilon buat komparasi float
         if 0 < dist_pdh_pts < (SAFE_DIST_POINTS - EPS):
             contract["signal"] = "SKIP"
             contract["reason"] = f"Near PDH ({int(dist_pdh_pts)} pts)"
@@ -191,7 +206,6 @@ def calculate_rules(data_pack):
     elif bear_engulf and bear_trend:
         dist_pdl_pts = to_points(tick['bid'] - hist['pdl'])
         
-        # [FIX] Pake Epsilon
         if 0 < dist_pdl_pts < (SAFE_DIST_POINTS - EPS):
             contract["signal"] = "SKIP"
             contract["reason"] = f"Near PDL ({int(dist_pdl_pts)} pts)"
