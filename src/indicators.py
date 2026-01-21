@@ -36,23 +36,49 @@ def calculate_rules(data_pack):
         "meta": {"spread": 0, "session": False}
     }
 
+    # ... (kode awal sama) ...
+
     # 1. CRITICAL DATA VALIDATION
     if not data_pack or 'tick' not in data_pack:
         contract["reason"] = "Data Empty"
         return contract
 
     meta = data_pack.get("meta", {})
-    tick_time = meta.get("tick_time")
     server_time = meta.get("server_time")
-    local_time = int(time.time())
-
-    # [GUARD 1] Real Stale Feed Check (Broker Connection)
-    # Kalau tick time udah lewat 30 detik dari sekarang, MT5 putus!
-    if tick_time:
-        data_lag = local_time - tick_time
+    
+    # [GUARD 1] Real Stale Feed Check (Millisecond Precision)
+    tick_time_msc = meta.get("tick_time_msc") # Ambil yg MS
+    local_time = time.time() # Float (ada koma detiknya)
+    
+    if tick_time_msc:
+        # Convert Broker MS ke Seconds Float
+        broker_ts = tick_time_msc / 1000.0 
+        data_lag = local_time - broker_ts
+        
+        # A. Check Stale (Data Basi)
         if data_lag > STALE_FEED_THRESHOLD:
-            contract["reason"] = f"BROKER DISCONNECT? (Tick Lag: {data_lag}s)"
+            contract["reason"] = f"BROKER LAG ({data_lag:.2f}s)"
             return contract
+            
+        # B. Check Future Tick (Clock Drift / Timezone Ngaco)
+        # Toleransi -2 detik (takutnya network jitter)
+        if data_lag < -2.0:
+            contract["reason"] = f"FUTURE TICK DETECTED (Lag: {data_lag:.2f}s). Check PC Clock!"
+            return contract
+
+    # [GUARD 2] Clock Drift Check (System Integrity)
+    if server_time:
+        drift = int(local_time) - server_time
+        # Warning di Log kalau drift mulai kerasa (> 5 detik)
+        if abs(drift) > 5:
+             contract["meta"]["clock_drift"] = drift
+        
+        # Kill Switch kalau drift parah (> 30 detik)
+        if abs(drift) > 30:
+             contract["reason"] = f"SYSTEM CLOCK MISMATCH ({drift}s)"
+             return contract
+
+    # ... (lanjut ke tick validation bid/ask, copy paste yg lama) ...
     
     # [GUARD 2] Clock Drift Check (System Integrity)
     # Kalau jam Ubuntu kecepetan/telat jauh dari jam Windows, logic Close Candle bisa kacau.
