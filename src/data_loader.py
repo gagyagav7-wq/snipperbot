@@ -22,7 +22,7 @@ def get_market_data():
     """
     Mengambil data dari Server MT5 via ZMQ.
     """
-    # [FIX] Deklarasi global harus di BARIS PERTAMA fungsi
+    # [FIX] Posisi global socket WAJIB di baris pertama fungsi
     global socket 
 
     try:
@@ -39,7 +39,6 @@ def get_market_data():
             return None
 
     except zmq.Again:
-        # Timeout logic
         print("⚠️ Connection Timeout - Reconnecting...")
         try:
             socket.close()
