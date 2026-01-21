@@ -1,5 +1,4 @@
 import time
-import pandas as pd
 from datetime import datetime
 import pytz
 from src.data_loader import get_market_data
@@ -7,53 +6,61 @@ from src.indicators import analyze_technicals
 from src.ai_council import run_debate
 from src.telegram_bot import send_alert
 from src.config import SYMBOL
+from src.historical_context import get_big_picture # Import modul baru
 
 tz = pytz.timezone('Asia/Jakarta')
 
-print(f"🚀 BOT SCALPING SIAP TEMPUR...")
+print(f"🚀 BOT STARTING...")
 
-# Variable buat ngunci biar ga spam
-last_processed_candle_time = None 
+# 1. LOAD CONTEXT (SEJARAH) SEKALI AJA PAS START
+history = get_big_picture(SYMBOL)
+if history is None:
+    print("⚠️ Gagal load history, bot jalan dengan mode buta sejarah.")
+    # Default dummy biar ga error
+    history = {'daily':{'trend':'NEUTRAL','pdh':0,'pdl':0}, 'weekly':{'trend':'NEUTRAL','range_low':0,'range_high':0}, 'monthly':{'range_low':0,'range_high':0}}
+
+last_processed_candle_time = None
+current_day = datetime.now(tz).day
 
 while True:
     try:
-        # 1. Ambil Data
+        # Cek Ganti Hari (Buat refresh data PDH/PDL)
+        if datetime.now(tz).day != current_day:
+            print("🔄 Hari baru! Refresh data sejarah...")
+            history = get_big_picture(SYMBOL)
+            current_day = datetime.now(tz).day
+        
+        # ... (Logika Ambil Data Realtime sama kayak sebelumnya) ...
         data_dict = get_market_data(SYMBOL)
         if data_dict is None:
             time.sleep(5)
             continue
             
-        # 2. Analisa
         analysis = analyze_technicals(data_dict)
-        
-        # Waktu candle yang baru saja close (bukan waktu sekarang)
         candle_close_time = analysis['timestamp']
         
-        # --- LOGIKA ANTI SPAM ---
-        # Kalau waktu candle ini SAMA dengan yang terakhir diproses, berati ini candle lama. SKIP.
         if last_processed_candle_time == candle_close_time:
-            # Print titik doang biar tau bot idup
-            print(".", end="", flush=True)
-            time.sleep(3) # Cek lagi 3 detik kemudian
+            time.sleep(1)
             continue
             
-        # Kalau ini candle BARU, baru kita cek sinyalnya
-        print(f"\n[{datetime.now(tz).strftime('%H:%M:%S')}] New Candle Close: {analysis['price']}")
+        print(f"[{datetime.now(tz).strftime('%H:%M')}] Price: {analysis['price']}")
         
         if analysis['has_trigger']:
-            print("⚡ Setup Valid! Memanggil Dewan AI...")
+            print("⚡ Trigger! Checking Context...")
             
-            debate = run_debate(analysis)
+            # 2. MASUKIN DATA SEJARAH KE AI
+            debate = run_debate(analysis, history)
             
             if debate and debate.get('decision') != "SKIP":
+                # Tambahin info sejarah di alert biar lu tau
+                analysis['pdh'] = history['daily']['pdh']
+                analysis['pdl'] = history['daily']['pdl']
+                
                 send_alert(debate, analysis)
-                print("✅ Alert Terkirim!")
-            else:
-                print("❌ AI Memutuskan SKIP (Resiko Tinggi/Trend Lawan Arah).")
+                last_processed_candle_time = candle_close_time
         
-        # Kunci candle ini biar gak diproses ulang
         last_processed_candle_time = candle_close_time
         
     except Exception as e:
-        print(f"Error Loop: {e}")
+        print(f"Error: {e}")
         time.sleep(10)
