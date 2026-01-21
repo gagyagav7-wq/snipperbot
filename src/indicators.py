@@ -82,17 +82,29 @@ def calculate_rules(data_pack):
              return contract
 
     # --- GUARD 2: VALIDASI TICK & HISTORY ---
-    tick = data_pack['tick']
-    point = tick.get('point')
-    digits = tick.get('digits')
-    
-    if tick.get('bid', 0) <= 0 or tick.get('ask', 0) <= 0:
-        contract["reason"] = "Market Closed"
-        return contract
-
-    if point is None or point <= 0 or digits is None or digits < 1:
-        contract["reason"] = "Invalid Point/Digits"
-        return contract
+    # ... (setelah dapet data market) ...
+    tick = data['tick']
+        
+    # 1. CEK NASIB TRADE SEBELUMNYA
+    status = check_trade_status(tick['bid'], tick['ask'], tick['high'], tick['low'])
+        
+    if status in ["TP_HIT", "SL_HIT"]:
+        color = "✅" if status == "TP_HIT" else "❌"
+        send_telegram(f"{color} *TRADE CLOSED:* {status}")
+        print(f"[{datetime.now().strftime('%H:%M')}] {status}! Memory Cleared.")
+        save_state(active=False) # RESET MEMORI
+            
+    # 2. KALAU ADA SINYAL BARU
+    if signal in ["BUY", "SELL"]:
+        # CEK: LAGI ADA TRADE JALAN GAK?
+        if status == "STILL_OPEN":
+            # Jangan kirim sinyal kalau yang lama belum kelar
+            contract["signal"] = "WAIT"
+            contract["reason"] = "Waiting for SL/TP of previous trade"
+        else:
+            # BARU BOLEH KIRIM SINYAL & SIMPAN KE MEMORI
+            send_telegram(msg)
+            save_state(active=True, signal_type=signal, sl=setup['sl'], tp=setup['tp'])
 
     # --- KONVERSI LIST KE DATAFRAME (FIX TIMEZONE) ---
     # Tambahkan parameter utc=True biar Python tau ini jam universal
