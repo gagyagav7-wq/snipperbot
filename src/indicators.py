@@ -46,7 +46,6 @@ def calculate_rules(data_pack):
         contract["reason"] = "Data Empty"
         return contract
 
-    # ... (bagian ambil meta) ...
     meta = data_pack.get("meta", {})
     tick_time_msc = meta.get("tick_time_msc")
     tick_time_sec = meta.get("tick_time")
@@ -55,20 +54,22 @@ def calculate_rules(data_pack):
     broker_ts     = None
 
     # [CRITICAL CHECK] Timestamp Logic dengan Fallback
-    # 1. Prioritas Utama: Pakai Milidetik (msc) kalau ada dan valid (>0)
     if tick_time_msc is not None and tick_time_msc > 0:
         broker_ts = tick_time_msc / 1000.0
-        
-    # 2. Fallback: Kalau msc 0/None, pakai Detik (sec)
     elif tick_time_sec is not None and tick_time_sec > 0:
         broker_ts = float(tick_time_sec)
 
-    # 3. Final Guard: Kalau dua-duanya gak ada, baru teriak Error
     if broker_ts is not None:
         data_lag = local_time - broker_ts
-        # ... (lanjut cek lag) ...
+        if data_lag > STALE_FEED_THRESHOLD:
+            contract["reason"] = f"BROKER LAG ({data_lag:.1f}s)"
+            return contract
+        if -10.0 < data_lag < -2.0:
+            contract["meta"]["warnings"].append(f"Clock Drift ({data_lag:.2f}s)")
+        elif data_lag <= -10.0:
+            contract["reason"] = f"CRITICAL: Clock Behind ({data_lag:.1f}s)"
+            return contract
     else:
-        # Ini baru kejadian kalau msc=0 DAN sec=0 (Broker Mati Total)
         contract["reason"] = "CRITICAL: Invalid Broker Timestamp (None/0)"
         return contract
 
@@ -141,7 +142,6 @@ def calculate_rules(data_pack):
     prev_5m  = df_5m.iloc[-2]
     last_15m = df_15m.iloc[-1]
 
-    # [FIX 1] Update adx_ok status based on NaN values
     adx_ok = adx_columns_found and \
              pd.notna(last_15m['ADX']) and \
              pd.notna(last_15m['DMP']) and \
@@ -149,7 +149,7 @@ def calculate_rules(data_pack):
 
     if (pd.isna(last_5m['ATR']) or 
         pd.isna(last_15m['EMA_200']) or 
-        not adx_ok): # Guard NaN DMP/DMN/ADX
+        not adx_ok): 
         contract["reason"] = "Indicators Calculating (NaN)..."
         return contract
 
@@ -224,17 +224,15 @@ def calculate_rules(data_pack):
     contract["meta"]["safe_dist_pts"] = adaptive_safe_dist_pts
     contract["meta"]["safe_dist_price"] = safe_dist_price
 
-    # =========================================================
-    # 👇👇 PINDAHKAN KODE EXPORT KE SINI (SEBELUM IF/ELSE) 👇👇
-    # =========================================================
+    # ---------------------------------------------------------
+    # 👇 EXPORT DATA LOGGER DI SINI (SEBELUM LOGIC RETURN) 👇
+    # ---------------------------------------------------------
     
-    # 1. Simpan Waktu Server & Tick
     input_meta = data_pack.get("meta", {})
     contract["meta"]["tick_time"]     = input_meta.get("tick_time")
     contract["meta"]["tick_time_msc"] = input_meta.get("tick_time_msc")
     contract["meta"]["server_time"]   = input_meta.get("server_time")
 
-    # 2. Simpan Data Candle Terakhir (Close Price Real)
     try:
         contract["meta"]["candle"] = {
             "close": float(last_5m.get('Close', 0)),
@@ -245,7 +243,6 @@ def calculate_rules(data_pack):
     except:
         contract["meta"]["candle"] = {}
 
-    # 3. Simpan Nilai Indikator (Biar Logger Selalu Dapat Data)
     try:
         contract["meta"]["indicators"] = {
             "rsi": round(float(last_5m.get('RSI', 0)), 2),
@@ -259,9 +256,9 @@ def calculate_rules(data_pack):
     except Exception:
         contract["meta"]["indicators"] = {}
 
-    # =========================================================
-    # BARU MASUK LOGIKA BUY/SELL (Sekarang Data Indikator Aman)
-    # =========================================================
+    # ---------------------------------------------------------
+    # LOGIC SINYAL BUY/SELL
+    # ---------------------------------------------------------
 
     # -- SETUP BUY --
     if bull_engulf and strong_bull:
@@ -321,74 +318,5 @@ def calculate_rules(data_pack):
             contract["reason"] = f"Bear Pattern but Weak Trend (ADX {adx_val})"
         else:
             contract["reason"] = "No Setup"
-
-    return contract
-    
-        entry = tick['bid']
-        sl_dist_raw = last_5m['ATR'] * ATR_SL_MULT
-        if to_points(sl_dist_raw) < min_sl_dist_pts: sl_dist_raw = min_sl_dist_pts * point
-
-        contract["signal"] = "SELL"
-        contract["reason"] = f"Bear Engulf + Strong Trend (ADX {int(last_15m['ADX'])})"
-        contract["setup"] = {
-            "action": "SELL", "entry": round(entry, digits),
-            "sl": round(entry + sl_dist_raw, digits),
-            "tp": round(entry - (sl_dist_raw * RR_RATIO), digits),
-            "atr": round(last_5m['ATR'], digits)
-        }
-    
-    # ... (Bagian atas logic BUY/SELL setup) ...
-
-    else:
-        # Logika ketika tidak ada setup
-        adx_val = int(last_15m['ADX']) if adx_ok else 0
-        
-        if (bull_engulf or bear_engulf) and not adx_ok:
-            contract["reason"] = "Pattern Found but ADX Missing"
-        elif bull_engulf and not strong_bull:
-            contract["reason"] = f"Bull Pattern but Weak Trend (ADX {adx_val})"
-        elif bear_engulf and not strong_bear:
-            contract["reason"] = f"Bear Pattern but Weak Trend (ADX {adx_val})"
-        else:
-            contract["reason"] = "No Setup"
-
-    # ... (Logic strategi di atas tetap sama) ...
-    
-    # ---------------------------------------------------------
-    # 👇👇 DATA EKSPOR UNTUK LOGGER (AUDIT TRAIL) 👇👇
-    # ---------------------------------------------------------
-    
-    # 1. Simpan Waktu Server & Tick (Untuk hitung Lag di Logger)
-    # Kita ambil dari meta input awal, teruskan ke output contract
-    input_meta = data_pack.get("meta", {})
-    contract["meta"]["tick_time"]     = input_meta.get("tick_time")
-    contract["meta"]["tick_time_msc"] = input_meta.get("tick_time_msc")
-    contract["meta"]["server_time"]   = input_meta.get("server_time")
-
-    # 2. Simpan Data Candle Terakhir (Close Price Real)
-    try:
-        contract["meta"]["candle"] = {
-            "close": float(last_5m.get('Close', 0)),
-            "high":  float(last_5m.get('High', 0)),
-            "low":   float(last_5m.get('Low', 0)),
-            "time":  str(last_5m.name) # Timestamp candle
-        }
-    except:
-        contract["meta"]["candle"] = {}
-
-    # 3. Simpan Nilai Indikator (Desimal Presisi)
-    try:
-        contract["meta"]["indicators"] = {
-            "rsi": round(float(last_5m.get('RSI', 0)), 2),
-            "atr": round(float(last_5m.get('ATR', 0)), 5),
-            # Pake float round 2 digit biar lebih akurat dari int
-            "adx": round(float(last_15m.get('ADX', 0)), 2),
-            "dmp": round(float(last_15m.get('DMP', 0)), 2),
-            "dmn": round(float(last_15m.get('DMN', 0)), 2),
-            "ema50_m15": round(float(last_15m.get('EMA_50', 0)), 2),
-            "ema200_m15": round(float(last_15m.get('EMA_200', 0)), 2)
-        }
-    except Exception:
-        contract["meta"]["indicators"] = {}
 
     return contract
