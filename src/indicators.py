@@ -94,13 +94,14 @@ def calculate_rules(data_pack):
         contract["reason"] = "Invalid Point/Digits"
         return contract
 
-    # --- KONVERSI LIST KE DATAFRAME (FIX BUG 'list has no ta') ---
+    # --- KONVERSI LIST KE DATAFRAME (FIX TIMEZONE) ---
+    # Tambahkan parameter utc=True biar Python tau ini jam universal
     df_5m = pd.DataFrame(data_pack['m5'])
-    df_5m['time'] = pd.to_datetime(df_5m['time'], unit='s')
+    df_5m['time'] = pd.to_datetime(df_5m['time'], unit='s', utc=True) 
     df_5m.set_index('time', inplace=True)
 
     df_15m = pd.DataFrame(data_pack['m15'])
-    df_15m['time'] = pd.to_datetime(df_15m['time'], unit='s')
+    df_15m['time'] = pd.to_datetime(df_15m['time'], unit='s', utc=True)
     df_15m.set_index('time', inplace=True)
 
     hist = data_pack.get('history', {})
