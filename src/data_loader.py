@@ -1,31 +1,36 @@
 import yfinance as yf
+import pandas as pd
 
 def get_market_data(symbol="GC=F"):
     try:
-        # 1. Ambil Data XAUUSD (M15 dan H1)
-        # Period 5 hari cukup untuk hitung indikator M15
-        df_m15 = yf.download(symbol, period="5d", interval="15m", progress=False)
+        # Ambil 3 Timeframe Sekaligus
+        # 1m = Data "mikro" buat entry (cuma bisa ambil 7 hari terakhir di Yahoo)
+        df_1m = yf.download(symbol, period="5d", interval="1m", progress=False)
         
-        # Period 1 bulan untuk H1 (Trend Besar)
-        df_h1 = yf.download(symbol, period="1mo", interval="1h", progress=False)
+        # 5m = Data "tactical"
+        df_5m = yf.download(symbol, period="5d", interval="5m", progress=False)
         
-        # 2. Ambil Data DXY (US Dollar Index) - H1
+        # 15m = Data "trend"
+        df_15m = yf.download(symbol, period="1mo", interval="15m", progress=False)
+        
+        # DXY tetep pake H1 buat korelasi makro
         df_dxy = yf.download("DX-Y.NYB", period="1mo", interval="1h", progress=False)
 
-        if len(df_m15) < 50 or len(df_h1) < 50:
+        # Validasi Data
+        if len(df_1m) < 50 or len(df_5m) < 50 or len(df_15m) < 50:
             return None
 
-        # Fix bug Yahoo Finance (Multi-level columns)
-        for df in [df_m15, df_h1, df_dxy]:
+        # Fix Multi-Index Column (Penyakit Yahoo Finance baru)
+        for df in [df_1m, df_5m, df_15m, df_dxy]:
             if isinstance(df.columns, pd.MultiIndex):
                 try:
                     df.columns = df.columns.get_level_values(0)
-                except:
-                    pass
+                except: pass
 
         return {
-            "m15": df_m15,
-            "h1": df_h1,
+            "1m": df_1m,
+            "5m": df_5m,
+            "15m": df_15m,
             "dxy": df_dxy
         }
 
