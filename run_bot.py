@@ -4,6 +4,7 @@ import sys
 import requests
 from dotenv import load_dotenv
 from datetime import datetime
+from src.state_manager import check_trade_status, save_state
 
 # Import Module Buatan Kita
 from src.data_loader import get_market_data
