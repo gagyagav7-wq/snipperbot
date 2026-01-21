@@ -1,0 +1,16 @@
+# --- KUNCI RAHASIA (JANGAN DIHAPUS) ---
+.env
+.env.local
+
+# --- Python Sampah ---
+__pycache__/
+*.py[cod]
+*$py.class
+
+# --- Logs ---
+logs/
+*.log
+
+# --- VS Code / Editor ---
+.vscode/
+.idea/
