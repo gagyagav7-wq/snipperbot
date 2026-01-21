@@ -30,8 +30,8 @@ RR_RATIO          = 2.0
 MIN_BODY_ATR        = 0.3  
 ADX_THRESHOLD       = 20   
 SAFE_DIST_ATR       = 0.5  
-MIN_SAFE_DIST_PRICE = 0.50 # Floor $0.50
-MAX_SAFE_DIST_PRICE = 2.00 # Cap $2.00
+MIN_SAFE_DIST_PRICE = 0.50 
+MAX_SAFE_DIST_PRICE = 2.00 
 
 def calculate_rules(data_pack):
     
@@ -60,20 +60,16 @@ def calculate_rules(data_pack):
     local_time    = time.time()
     broker_ts     = None
 
-    # A. Tentukan Timestamp Broker
     if tick_time_msc is not None and tick_time_msc > 0:
         broker_ts = tick_time_msc / 1000.0
     elif tick_time_sec is not None and tick_time_sec > 0:
         broker_ts = float(tick_time_sec)
 
-    # B. Cek Freshness Data
     if broker_ts is not None:
         data_lag = local_time - broker_ts
-        
         if data_lag > STALE_FEED_THRESHOLD:
             contract["reason"] = f"BROKER LAG ({data_lag:.1f}s) - Check Connection"
             return contract
-            
         if -10.0 < data_lag < -2.0:
             msg = f"Clock Drift Detected ({data_lag:.2f}s)"
             contract["meta"]["warnings"].append(msg)
@@ -85,14 +81,10 @@ def calculate_rules(data_pack):
         contract["reason"] = "CRITICAL: Invalid Broker Timestamp (None/0)"
         return contract
 
-    # C. Cek Integritas Jam Sistem
     if server_time is not None:
         drift = local_time - float(server_time)
         drift_int = int(round(drift))
-        
-        if abs(drift_int) > 5: 
-            contract["meta"]["system_drift"] = drift_int
-            
+        if abs(drift_int) > 5: contract["meta"]["system_drift"] = drift_int
         if abs(drift_int) > CLOCK_DRIFT_LIMIT:
              contract["reason"] = f"System Clock Mismatch ({drift_int}s)"
              return contract
@@ -131,23 +123,20 @@ def calculate_rules(data_pack):
     # ==========================================
     # 📊 3. KALKULASI INDIKATOR
     # ==========================================
-    # M5 Indicators
     df_5m['EMA_50'] = df_5m.ta.ema(length=50)
     df_5m['ATR']    = df_5m.ta.atr(length=14)
     df_5m['RSI']    = df_5m.ta.rsi(length=14)
     
-    # M15 Indicators
     df_15m['EMA_50']  = df_15m.ta.ema(length=50)
     df_15m['EMA_200'] = df_15m.ta.ema(length=200)
     
     # Robust ADX Extraction
     adx_df = df_15m.ta.adx(length=14)
-    
     df_15m['ADX'] = 0
     df_15m['DMP'] = 0
     df_15m['DMN'] = 0
+    adx_ok = False
 
-    adx_ok = False # Flag status ADX
     if adx_df is not None and not adx_df.empty:
         col_adx = [c for c in adx_df.columns if c.startswith("ADX")]
         col_dmp = [c for c in adx_df.columns if c.startswith("DMP")]
@@ -167,7 +156,8 @@ def calculate_rules(data_pack):
     prev_5m  = df_5m.iloc[-2]
     last_15m = df_15m.iloc[-1]
 
-    if pd.isna(last_5m['ATR']) or pd.isna(last_15m['EMA_200']):
+    # [FIX] Added ADX to NaN Guard to prevent crash
+    if pd.isna(last_5m['ATR']) or pd.isna(last_15m['EMA_200']) or pd.isna(last_15m['ADX']):
         contract["reason"] = "Indicators Calculating (NaN)..."
         return contract
 
@@ -249,6 +239,10 @@ def calculate_rules(data_pack):
     raw_safe_dist_price = last_5m['ATR'] * SAFE_DIST_ATR
     safe_dist_price = max(MIN_SAFE_DIST_PRICE, min(MAX_SAFE_DIST_PRICE, raw_safe_dist_price))
     adaptive_safe_dist_pts = to_points(safe_dist_price)
+    
+    # [NEW] Audit Logs
+    contract["meta"]["safe_dist_pts"] = adaptive_safe_dist_pts
+    contract["meta"]["safe_dist_price"] = safe_dist_price
 
     # --- SETUP BUY ---
     if bull_engulf and strong_bull:
@@ -268,8 +262,11 @@ def calculate_rules(data_pack):
         sl = entry - sl_dist_raw
         tp = entry + (sl_dist_raw * RR_RATIO)
         
+        # [FIX] Safe integer conversion
+        safe_adx = int(last_15m['ADX']) if pd.notna(last_15m['ADX']) else 0
+        
         contract["signal"] = "BUY"
-        contract["reason"] = f"Bull Engulf + Strong Trend (ADX {int(last_15m['ADX'])})"
+        contract["reason"] = f"Bull Engulf + Strong Trend (ADX {safe_adx})"
         contract["setup"] = {
             "action": "BUY",
             "entry":  round(entry, digits),
@@ -282,7 +279,6 @@ def calculate_rules(data_pack):
     elif bear_engulf and strong_bear:
         dist_pdl_pts = to_points(tick['bid'] - hist['pdl'])
         
-        # [FIX FATAL BUG] Variable name corrected: dist_pdh_pts -> dist_pdl_pts
         if 0 < dist_pdl_pts < (adaptive_safe_dist_pts - EPS):
             contract["signal"] = "SKIP"
             contract["reason"] = f"Near PDL ({dist_pdl_pts:.1f} < {adaptive_safe_dist_pts:.1f} pts)"
@@ -297,8 +293,10 @@ def calculate_rules(data_pack):
         sl = entry + sl_dist_raw
         tp = entry - (sl_dist_raw * RR_RATIO)
         
+        safe_adx = int(last_15m['ADX']) if pd.notna(last_15m['ADX']) else 0
+        
         contract["signal"] = "SELL"
-        contract["reason"] = f"Bear Engulf + Strong Trend (ADX {int(last_15m['ADX'])})"
+        contract["reason"] = f"Bear Engulf + Strong Trend (ADX {safe_adx})"
         contract["setup"] = {
             "action": "SELL",
             "entry":  round(entry, digits),
@@ -308,16 +306,15 @@ def calculate_rules(data_pack):
         }
     
     else:
-        # [FIX] Better Reason Logic
-        adx_val = int(last_15m['ADX'])
+        # [FIX] Safe Reason + NaN Guard
+        safe_adx = int(last_15m['ADX']) if pd.notna(last_15m['ADX']) else 0
         
         if (bull_engulf or bear_engulf) and not adx_ok:
-            # Pattern ada, tapi ADX rusak
-            contract["reason"] = "Pattern Found but ADX Data Missing"
+            contract["reason"] = "Pattern Found but ADX Missing (See Warnings)"
         elif bull_engulf and not strong_bull:
-            contract["reason"] = f"Bull Pattern but Weak/Mix Trend (ADX {adx_val})"
+            contract["reason"] = f"Bull Pattern but Weak/Mix Trend (ADX {safe_adx})"
         elif bear_engulf and not strong_bear:
-            contract["reason"] = f"Bear Pattern but Weak/Mix Trend (ADX {adx_val})"
+            contract["reason"] = f"Bear Pattern but Weak/Mix Trend (ADX {safe_adx})"
         else:
             contract["reason"] = "No Setup"
 
