@@ -1,20 +1,22 @@
 import pandas as pd
 import pandas_ta as ta
 import pytz
+import time
 from datetime import datetime
 
-# --- HYPERPARAMETERS (Bisa dipindah ke .env nanti) ---
+# --- CONFIG ---
 WIB = pytz.timezone('Asia/Jakarta')
 SESSION_START = 14  
 SESSION_END = 23    
 
-# Broker Safety Checks
-ABNORMAL_LEVEL_THRESHOLD = 100 # Kalau Freeze/Stop > 100, market chaos.
+# Safety Thresholds
+STALE_FEED_THRESHOLD = 30 # Detik (Batas toleransi lag server)
+ABNORMAL_LEVEL_THRESHOLD = 100 
 MAX_SPREAD = 35         
 BUFFER_STOP_LEVEL = 10  
 MIN_ABS_STOP_DIST = 50 
 
-# Strategy Params
+# Strategy
 SAFE_DIST_POINTS = 200  
 ATR_SL_MULT = 1.5       
 RR_RATIO = 2.0          
@@ -36,22 +38,25 @@ def calculate_rules(data_pack):
         contract["reason"] = "Data Empty"
         return contract
 
+    # [GUARD] Stale Feed (Data Basi)
+    server_time = data_pack.get("meta", {}).get("server_time")
+    if server_time:
+        lag = abs(int(time.time()) - server_time)
+        if lag > STALE_FEED_THRESHOLD:
+            contract["reason"] = f"Stale Feed (Lag: {lag}s)"
+            return contract
+
     tick = data_pack['tick']
     point = tick.get('point')
     digits = tick.get('digits')
     
-    # [GUARD] Market Closed / Invalid Tick
+    # [GUARD] Market Conditions
     if tick.get('bid', 0) <= 0 or tick.get('ask', 0) <= 0:
         contract["reason"] = "Market Closed (Tick 0)"
         return contract
 
-    if point is None or point <= 0:
-        contract["reason"] = "Invalid Point Value"
-        return contract
-        
-    # [GUARD] Digits Check (Cukup cek < 1)
-    if digits is None or digits < 1: 
-        contract["reason"] = "Invalid Digits"
+    if point is None or point <= 0 or digits is None or digits < 1:
+        contract["reason"] = "Invalid Point/Digits"
         return contract
 
     df_5m = data_pack['m5'].copy()
@@ -65,6 +70,8 @@ def calculate_rules(data_pack):
 
     contract["df_5m"] = df_5m
     contract["tick"] = tick
+    # Kirim D1 time ke metadata biar bisa diaudit manusia
+    contract["meta"]["d1_time"] = hist.get("d1_time")
 
     # [GUARD] Data Length
     if len(df_5m) < 60 or len(df_15m) < 200:
@@ -87,8 +94,7 @@ def calculate_rules(data_pack):
         contract["reason"] = "Indicators Loading..."
         return contract
 
-    # 3. TIMEZONE (Clean Version)
-    # Kita percaya loader sudah set index ke UTC Aware
+    # 3. TIMEZONE
     try:
         wib_time = last_5m.name.tz_convert(WIB)
         contract["timestamp"] = wib_time
@@ -102,16 +108,16 @@ def calculate_rules(data_pack):
         contract["reason"] = f"Time Error: {e}"
         return contract
 
-    # 4. MARKET CONDITION FILTERS
+    # 4. MARKET FILTERS
     spread = tick.get('spread', 999)
     stop_level = tick.get('stop_level', 0)
     freeze_level = tick.get('freeze_level', 0)
     contract["meta"]["spread"] = spread
 
-    # [GUARD] Abnormal Broker Conditions
+    # [GUARD] Broker Restrictions
     if stop_level > ABNORMAL_LEVEL_THRESHOLD or freeze_level > ABNORMAL_LEVEL_THRESHOLD:
         contract["signal"] = "SKIP"
-        contract["reason"] = f"Broker Restriction High (Stop: {stop_level}, Freeze: {freeze_level})"
+        contract["reason"] = f"Broker Restricted (Stop: {stop_level}, Freeze: {freeze_level})"
         return contract
 
     if spread > MAX_SPREAD:
@@ -119,7 +125,7 @@ def calculate_rules(data_pack):
         contract["reason"] = f"High Spread: {spread}"
         return contract
 
-    # 5. STRATEGY (Trend + Pattern + RSI)
+    # 5. STRATEGY
     bull_trend = (last_15m['Close'] > last_15m['EMA_50']) and (last_15m['EMA_50'] > last_15m['EMA_200'])
     bear_trend = (last_15m['Close'] < last_15m['EMA_50']) and (last_15m['EMA_50'] < last_15m['EMA_200'])
 
@@ -140,16 +146,16 @@ def calculate_rules(data_pack):
                   (last_5m['Close'] < prev_5m['Low']) and \
                   (last_5m['RSI'] > 30)
 
-    # 6. EXECUTION LOGIC
-    def to_points(val): return val / point
+    # 6. EXECUTION LOGIC (Rounding Fix)
+    def to_points(val): return round(val / point, 2) # Rounding biar gak ada noise float 199.999
 
-    # Minimum SL Distance logic
     min_dist_req = stop_level + freeze_level + spread + BUFFER_STOP_LEVEL
     min_sl_dist_pts = max(min_dist_req, MIN_ABS_STOP_DIST)
 
     # -- BUY --
     if bull_engulf and bull_trend:
         dist_pdh_pts = to_points(hist['pdh'] - tick['ask'])
+        # [HARDENING] Tolerance Float
         if 0 < dist_pdh_pts < SAFE_DIST_POINTS:
             contract["signal"] = "SKIP"
             contract["reason"] = f"Near PDH ({int(dist_pdh_pts)} pts)"
