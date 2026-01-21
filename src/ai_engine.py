@@ -1,47 +1,33 @@
 import google.generativeai as genai
 import json
 import os
-import re
+
+# Init sekali di level module
+api_key = os.getenv("GEMINI_API_KEY")
+if api_key:
+    genai.configure(api_key=api_key)
+    MODEL = genai.GenerativeModel('gemini-1.5-flash')
+else:
+    MODEL = None
 
 def ask_ai_judge(signal_type, bot_reason, metrics):
-    """Hakim AI dengan pengaman ganda pada parsing JSON"""
-    api_key = os.getenv("GEMINI_API_KEY")
-    if not api_key:
-        return {"decision": "REJECT", "confidence": 0, "reason": "API Key Missing"}
+    if not MODEL: return {"decision": "REJECT", "reason": "AI Key Missing"}
 
-    genai.configure(api_key=api_key)
-    model = genai.GenerativeModel('gemini-1.5-flash')
-    
-    # Ringkasan data agar hemat token & akurat
+    # Kasih konteks yang "kenyang" sesuai saran pro
     prompt = f"""
-    Analisa sinyal {signal_type} XAUUSD.
-    Alasan Bot: {bot_reason}
-    Metrik: {json.dumps(metrics)}
+    As Senior XAUUSD Trader, debate this {signal_type} signal.
+    Reason: {bot_reason}
+    Market Context: {json.dumps(metrics)}
     
-    Tugas: Debat sinyal ini secara kritis. Berikan keputusan APPROVE atau REJECT.
-    Output WAJIB dalam format JSON:
-    {{
-      "decision": "APPROVE atau REJECT",
-      "confidence": 0-100,
-      "risk_flags": ["list risiko"],
-      "reason": "debat singkat"
-    }}
+    Rules:
+    - Reject if spread is high or feed is laggy.
+    - Check if price is too close to PDH/PDL.
+    Output JSON ONLY:
+    {{"decision": "APPROVE/REJECT", "confidence": 0-100, "reason": "..."}}
     """
 
     try:
-        response = model.generate_content(
-            prompt, 
-            generation_config={"response_mime_type": "application/json"}
-        )
-        # Pengaman ganda: coba parse langsung, kalau gagal pakai regex
-        try:
-            return json.loads(response.text)
-        except:
-            match = re.search(r'\{.*\}', response.text, re.DOTALL)
-            if match:
-                return json.loads(match.group())
-            raise ValueError("JSON not found")
-            
-    except Exception as e:
-        print(f"⚠️ AI Engine Error: {e}")
-        return {"decision": "REJECT", "confidence": 0, "reason": "AI Fallback: Reject due to error"}
+        response = MODEL.generate_content(prompt, generation_config={"response_mime_type": "application/json"})
+        return json.loads(response.text)
+    except:
+        return {"decision": "REJECT", "reason": "AI Error Fallback"}
