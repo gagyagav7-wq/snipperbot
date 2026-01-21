@@ -3,21 +3,22 @@ import pandas_ta as ta
 import pytz
 from datetime import datetime
 
-# --- KONFIGURASI STRATEGI ---
+# --- HYPERPARAMETERS (Bisa dipindah ke .env nanti) ---
 WIB = pytz.timezone('Asia/Jakarta')
 SESSION_START = 14  
 SESSION_END = 23    
 
+# Broker Safety Checks
+ABNORMAL_LEVEL_THRESHOLD = 100 # Kalau Freeze/Stop > 100, market chaos.
 MAX_SPREAD = 35         
+BUFFER_STOP_LEVEL = 10  
+MIN_ABS_STOP_DIST = 50 
+
+# Strategy Params
 SAFE_DIST_POINTS = 200  
 ATR_SL_MULT = 1.5       
 RR_RATIO = 2.0          
 MIN_BODY_ATR = 0.3      
-
-# Risk Config
-BUFFER_STOP_LEVEL = 10  
-MIN_ABS_STOP_DIST = 50 
-ABNORMAL_LEVEL_THRESHOLD = 100 # Kalau Freeze/Stop Level > 100 points, market lagi gila. SKIP.
 
 def calculate_rules(data_pack):
     contract = {
@@ -39,7 +40,7 @@ def calculate_rules(data_pack):
     point = tick.get('point')
     digits = tick.get('digits')
     
-    # [GUARD] Invalid Tick Data / Market Glitch
+    # [GUARD] Market Closed / Invalid Tick
     if tick.get('bid', 0) <= 0 or tick.get('ask', 0) <= 0:
         contract["reason"] = "Market Closed (Tick 0)"
         return contract
@@ -48,7 +49,8 @@ def calculate_rules(data_pack):
         contract["reason"] = "Invalid Point Value"
         return contract
         
-    if digits is None or digits < 1: # XAUUSD minimal digits 2
+    # [GUARD] Digits Check (Cukup cek < 1)
+    if digits is None or digits < 1: 
         contract["reason"] = "Invalid Digits"
         return contract
 
@@ -56,7 +58,7 @@ def calculate_rules(data_pack):
     df_15m = data_pack['m15'].copy()
     hist = data_pack.get('history', {})
     
-    # Guard History
+    # [GUARD] History
     if hist.get('pdh') is None or hist.get('pdl') is None:
         contract["reason"] = "History Missing"
         return contract
@@ -64,7 +66,7 @@ def calculate_rules(data_pack):
     contract["df_5m"] = df_5m
     contract["tick"] = tick
 
-    # Guard Data Length
+    # [GUARD] Data Length
     if len(df_5m) < 60 or len(df_15m) < 200:
         contract["reason"] = "Not Enough Bars"
         return contract
@@ -85,15 +87,10 @@ def calculate_rules(data_pack):
         contract["reason"] = "Indicators Loading..."
         return contract
 
-    # 3. TIMEZONE (Epoch UTC -> WIB)
+    # 3. TIMEZONE (Clean Version)
+    # Kita percaya loader sudah set index ke UTC Aware
     try:
-        ts = last_5m.name
-        if isinstance(ts, (int, float)):
-            utc_time = pd.to_datetime(ts, unit='s', utc=True)
-        else:
-            utc_time = pd.to_datetime(ts).tz_localize('UTC') if ts.tzinfo is None else ts
-
-        wib_time = utc_time.astimezone(WIB)
+        wib_time = last_5m.name.tz_convert(WIB)
         contract["timestamp"] = wib_time
         
         if not (SESSION_START <= wib_time.hour < SESSION_END):
@@ -109,7 +106,6 @@ def calculate_rules(data_pack):
     spread = tick.get('spread', 999)
     stop_level = tick.get('stop_level', 0)
     freeze_level = tick.get('freeze_level', 0)
-    
     contract["meta"]["spread"] = spread
 
     # [GUARD] Abnormal Broker Conditions
@@ -123,7 +119,7 @@ def calculate_rules(data_pack):
         contract["reason"] = f"High Spread: {spread}"
         return contract
 
-    # 5. STRATEGY (Strong Trend + Confirm)
+    # 5. STRATEGY (Trend + Pattern + RSI)
     bull_trend = (last_15m['Close'] > last_15m['EMA_50']) and (last_15m['EMA_50'] > last_15m['EMA_200'])
     bear_trend = (last_15m['Close'] < last_15m['EMA_50']) and (last_15m['EMA_50'] < last_15m['EMA_200'])
 
@@ -147,7 +143,7 @@ def calculate_rules(data_pack):
     # 6. EXECUTION LOGIC
     def to_points(val): return val / point
 
-    # Minimum SL Distance = StopLvl + FreezeLvl + Spread + Buffer
+    # Minimum SL Distance logic
     min_dist_req = stop_level + freeze_level + spread + BUFFER_STOP_LEVEL
     min_sl_dist_pts = max(min_dist_req, MIN_ABS_STOP_DIST)
 
@@ -162,7 +158,6 @@ def calculate_rules(data_pack):
         entry = tick['ask']
         sl_dist_raw = last_5m['ATR'] * ATR_SL_MULT
         
-        # SL Guard: Lebarin SL kalau kekecilan
         if to_points(sl_dist_raw) < min_sl_dist_pts:
             sl_dist_raw = min_sl_dist_pts * point
         
@@ -190,7 +185,6 @@ def calculate_rules(data_pack):
         entry = tick['bid']
         sl_dist_raw = last_5m['ATR'] * ATR_SL_MULT
         
-        # SL Guard
         if to_points(sl_dist_raw) < min_sl_dist_pts:
             sl_dist_raw = min_sl_dist_pts * point
 
