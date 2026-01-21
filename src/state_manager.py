@@ -1,20 +1,18 @@
 import json
 import os
 import uuid
-from datetime import datetime
 
 FILE_PATH = "trade_state.json"
 
-def save_state_atomic(active, signal_type=None, sl=0, tp=0, entry=0, reason=""):
-    """Menyimpan state secara Atomic (tulis ke file temp lalu rename)"""
+def save_state_atomic(active, sig_type=None, sl=0, tp=0, entry=0, reason=""):
+    """Simpan state pakai metode temp-rename (Atomic)"""
     state = {
-        "id": str(uuid.uuid4())[:8], # ID Unik buat audit
+        "id": str(uuid.uuid4())[:8],
         "active": active,
-        "type": signal_type,
+        "type": sig_type,
         "entry": float(entry),
         "sl": float(sl),
         "tp": float(tp),
-        "opened_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "reason": reason
     }
     
@@ -22,14 +20,13 @@ def save_state_atomic(active, signal_type=None, sl=0, tp=0, entry=0, reason=""):
     with open(temp_file, "w") as f:
         json.dump(state, f, indent=4)
         f.flush()
-        os.fsync(f.fileno()) # Paksa nulis ke disk
+        os.fsync(f.fileno()) # Paksa tulis ke disk
     
-    os.replace(temp_file, FILE_PATH) # Rename (Atomic)
+    os.replace(temp_file, FILE_PATH)
 
 def check_trade_status(high, low):
-    """Cek TP/SL berdasarkan High/Low candle yang sudah CLOSED"""
+    """Cek apakah harga High/Low candle menyentuh SL/TP di memori"""
     if not os.path.exists(FILE_PATH): return None
-
     try:
         with open(FILE_PATH, "r") as f:
             state = json.load(f)
@@ -37,7 +34,6 @@ def check_trade_status(high, low):
 
     if not state.get("active"): return None
 
-    # Hit Detection
     if state["type"] == "BUY":
         if high >= state["tp"]: return "TP_HIT"
         if low <= state["sl"]: return "SL_HIT"
