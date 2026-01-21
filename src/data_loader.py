@@ -4,12 +4,25 @@ import json
 import time
 import os
 
-# --- KONFIGURASI NETWORK ---
+# ==========================================
+# ⚙️ KONFIGURASI NETWORK
+# ==========================================
+
+# [OPSIONAL] Isi IP Windows manual di sini jika Auto-Detect gagal (misal: "192.168.1.5")
+# Biarkan None jika ingin menggunakan Auto-Detect.
+MANUAL_HOST_IP = None 
+
 def get_windows_host_ip():
     """
     Auto-detect IP Windows Host dari dalam WSL2 via resolv.conf.
-    Fallback ke 'localhost' jika bukan WSL.
+    Fallback ke 'localhost' jika bukan WSL atau jika MANUAL_HOST_IP diisi.
     """
+    # 1. Cek Manual Override dulu
+    if MANUAL_HOST_IP:
+        print(f"⚙️ Using Manual Host IP: {MANUAL_HOST_IP}")
+        return MANUAL_HOST_IP
+
+    # 2. Cek WSL Auto-Detect
     if "WSL_DISTRO_NAME" in os.environ:
         try:
             with open("/etc/resolv.conf", "r") as f:
@@ -21,6 +34,7 @@ def get_windows_host_ip():
                         return ip
         except Exception as e:
             print(f"⚠️ WSL IP Detect Failed: {e}. Using localhost.")
+    
     return "localhost"
 
 # Setup Address
@@ -108,13 +122,15 @@ def get_market_data():
         }
 
     except (zmq.Again, zmq.ZMQError):
-        # [FIX] Backoff Reconnect: Napas dulu 1 detik sebelum reconnect
-        # Biar CPU gak 100% kalau Server mati
+        # Backoff Reconnect: Napas dulu 1 detik sebelum reconnect
         time.sleep(1.0)
         _init_socket() 
         return None
         
     except Exception as e:
+        # [FIX CRITICAL] Reset socket juga kalau error aneh (JSON parse error, dll)
+        # Biar state ZMQ REQ/REP gak macet (deadlock)
         print(f"❌ Data Loader Error: {e}")
         time.sleep(1.0)
+        _init_socket()
         return None
