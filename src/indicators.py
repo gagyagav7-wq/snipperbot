@@ -29,9 +29,9 @@ RR_RATIO          = 2.0
 # 4. STRATEGY PARAMS
 MIN_BODY_ATR        = 0.3  
 ADX_THRESHOLD       = 20   
-SAFE_DIST_ATR       = 0.5   # Multiplier ATR
-MIN_SAFE_DIST_PRICE = 0.50  # [FLOOR] Minimal $0.50 (50 cents movement)
-MAX_SAFE_DIST_PRICE = 2.00  # [CAP]   Maksimal $2.00 (biar gak kejauhan pas news)
+SAFE_DIST_ATR       = 0.5  
+MIN_SAFE_DIST_PRICE = 0.50 # Floor $0.50
+MAX_SAFE_DIST_PRICE = 2.00 # Cap $2.00
 
 def calculate_rules(data_pack):
     
@@ -70,12 +70,10 @@ def calculate_rules(data_pack):
     if broker_ts is not None:
         data_lag = local_time - broker_ts
         
-        # Cek Stale (> 30s)
         if data_lag > STALE_FEED_THRESHOLD:
             contract["reason"] = f"BROKER LAG ({data_lag:.1f}s) - Check Connection"
             return contract
             
-        # Cek Clock Drift / Future Tick
         if -10.0 < data_lag < -2.0:
             msg = f"Clock Drift Detected ({data_lag:.2f}s)"
             contract["meta"]["warnings"].append(msg)
@@ -84,7 +82,6 @@ def calculate_rules(data_pack):
             contract["reason"] = f"CRITICAL: PC Clock Behind Broker ({data_lag:.1f}s). RESYNC TIME!"
             return contract
     else:
-        # Bank-Grade Fail-Safe
         contract["reason"] = "CRITICAL: Invalid Broker Timestamp (None/0)"
         return contract
 
@@ -143,14 +140,14 @@ def calculate_rules(data_pack):
     df_15m['EMA_50']  = df_15m.ta.ema(length=50)
     df_15m['EMA_200'] = df_15m.ta.ema(length=200)
     
-    # [FIX] Robust ADX Extraction
+    # Robust ADX Extraction
     adx_df = df_15m.ta.adx(length=14)
     
-    # Default values biar variable ke-define
     df_15m['ADX'] = 0
     df_15m['DMP'] = 0
     df_15m['DMN'] = 0
 
+    adx_ok = False # Flag status ADX
     if adx_df is not None and not adx_df.empty:
         col_adx = [c for c in adx_df.columns if c.startswith("ADX")]
         col_dmp = [c for c in adx_df.columns if c.startswith("DMP")]
@@ -160,11 +157,11 @@ def calculate_rules(data_pack):
             df_15m['ADX'] = adx_df[col_adx[0]]
             df_15m['DMP'] = adx_df[col_dmp[0]]
             df_15m['DMN'] = adx_df[col_dmn[0]]
+            adx_ok = True
         else:
-            # [NEW] Warning kalau kolom tidak ditemukan
             contract["meta"]["warnings"].append("ADX Columns Not Found (Using 0)")
     else:
-        contract["meta"]["warnings"].append("ADX Calculation Failed (Using 0)")
+        contract["meta"]["warnings"].append("ADX Calc Failed (Using 0)")
 
     last_5m  = df_5m.iloc[-1]
     prev_5m  = df_5m.iloc[-2]
@@ -209,7 +206,7 @@ def calculate_rules(data_pack):
         return contract
 
     # ==========================================
-    # 📈 6. LOGIKA STRATEGI (ADX + DIRECTION)
+    # 📈 6. LOGIKA STRATEGI
     # ==========================================
 
     strong_bull = (last_15m['Close'] > last_15m['EMA_50']) and \
@@ -240,7 +237,7 @@ def calculate_rules(data_pack):
                   (last_5m['RSI'] > 30)
 
     # ==========================================
-    # 🚀 7. EKSEKUSI & LEVEL (Price-Aware + Cap)
+    # 🚀 7. EKSEKUSI & LEVEL
     # ==========================================
     
     def to_points(val): return val / point
@@ -248,21 +245,15 @@ def calculate_rules(data_pack):
     min_dist_req    = stop_level + freeze_level + spread + BUFFER_STOP_LEVEL
     min_sl_dist_pts = max(min_dist_req, MIN_ABS_STOP_DIST)
 
-    # [NEW] Adaptive Safe Distance logic with FLOOR & CAP
-    # 1. Hitung base distance dari ATR
+    # Adaptive Safe Distance (Price Based)
     raw_safe_dist_price = last_5m['ATR'] * SAFE_DIST_ATR
-    
-    # 2. Apply Floor ($0.50) & Cap ($2.00)
     safe_dist_price = max(MIN_SAFE_DIST_PRICE, min(MAX_SAFE_DIST_PRICE, raw_safe_dist_price))
-    
-    # 3. Convert ke Points
     adaptive_safe_dist_pts = to_points(safe_dist_price)
 
     # --- SETUP BUY ---
     if bull_engulf and strong_bull:
         dist_pdh_pts = to_points(hist['pdh'] - tick['ask'])
         
-        # [FIX] Display pake .1f biar cantik di log
         if 0 < dist_pdh_pts < (adaptive_safe_dist_pts - EPS):
             contract["signal"] = "SKIP"
             contract["reason"] = f"Near PDH ({dist_pdh_pts:.1f} < {adaptive_safe_dist_pts:.1f} pts)"
@@ -291,9 +282,10 @@ def calculate_rules(data_pack):
     elif bear_engulf and strong_bear:
         dist_pdl_pts = to_points(tick['bid'] - hist['pdl'])
         
+        # [FIX FATAL BUG] Variable name corrected: dist_pdh_pts -> dist_pdl_pts
         if 0 < dist_pdl_pts < (adaptive_safe_dist_pts - EPS):
             contract["signal"] = "SKIP"
-            contract["reason"] = f"Near PDL ({dist_pdh_pts:.1f} < {adaptive_safe_dist_pts:.1f} pts)"
+            contract["reason"] = f"Near PDL ({dist_pdl_pts:.1f} < {adaptive_safe_dist_pts:.1f} pts)"
             return contract
 
         entry       = tick['bid']
@@ -316,8 +308,13 @@ def calculate_rules(data_pack):
         }
     
     else:
-        adx_val = int(last_15m['ADX']) if not pd.isna(last_15m['ADX']) else 0
-        if bull_engulf and not strong_bull:
+        # [FIX] Better Reason Logic
+        adx_val = int(last_15m['ADX'])
+        
+        if (bull_engulf or bear_engulf) and not adx_ok:
+            # Pattern ada, tapi ADX rusak
+            contract["reason"] = "Pattern Found but ADX Data Missing"
+        elif bull_engulf and not strong_bull:
             contract["reason"] = f"Bull Pattern but Weak/Mix Trend (ADX {adx_val})"
         elif bear_engulf and not strong_bear:
             contract["reason"] = f"Bear Pattern but Weak/Mix Trend (ADX {adx_val})"
