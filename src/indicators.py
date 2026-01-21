@@ -29,8 +29,9 @@ RR_RATIO          = 2.0
 # 4. STRATEGY PARAMS
 MIN_BODY_ATR        = 0.3  
 ADX_THRESHOLD       = 20   
-SAFE_DIST_ATR       = 0.5  # Multiplier ATR
-MIN_SAFE_DIST_PRICE = 0.50 # [NEW] Jarak aman minimal dalam DOLLAR (bukan point)
+SAFE_DIST_ATR       = 0.5   # Multiplier ATR
+MIN_SAFE_DIST_PRICE = 0.50  # [FLOOR] Minimal $0.50 (50 cents movement)
+MAX_SAFE_DIST_PRICE = 2.00  # [CAP]   Maksimal $2.00 (biar gak kejauhan pas news)
 
 def calculate_rules(data_pack):
     
@@ -42,7 +43,6 @@ def calculate_rules(data_pack):
         "timestamp": None,
         "tick": {},
         "df_5m": pd.DataFrame(),
-        # [NEW] Warnings jadi List biar bisa nampung banyak warning
         "meta": {"spread": 0, "session": False, "warnings": []}
     }
 
@@ -60,16 +60,22 @@ def calculate_rules(data_pack):
     local_time    = time.time()
     broker_ts     = None
 
+    # A. Tentukan Timestamp Broker
     if tick_time_msc is not None and tick_time_msc > 0:
         broker_ts = tick_time_msc / 1000.0
     elif tick_time_sec is not None and tick_time_sec > 0:
         broker_ts = float(tick_time_sec)
 
+    # B. Cek Freshness Data
     if broker_ts is not None:
         data_lag = local_time - broker_ts
+        
+        # Cek Stale (> 30s)
         if data_lag > STALE_FEED_THRESHOLD:
             contract["reason"] = f"BROKER LAG ({data_lag:.1f}s) - Check Connection"
             return contract
+            
+        # Cek Clock Drift / Future Tick
         if -10.0 < data_lag < -2.0:
             msg = f"Clock Drift Detected ({data_lag:.2f}s)"
             contract["meta"]["warnings"].append(msg)
@@ -78,13 +84,18 @@ def calculate_rules(data_pack):
             contract["reason"] = f"CRITICAL: PC Clock Behind Broker ({data_lag:.1f}s). RESYNC TIME!"
             return contract
     else:
+        # Bank-Grade Fail-Safe
         contract["reason"] = "CRITICAL: Invalid Broker Timestamp (None/0)"
         return contract
 
+    # C. Cek Integritas Jam Sistem
     if server_time is not None:
         drift = local_time - float(server_time)
         drift_int = int(round(drift))
-        if abs(drift_int) > 5: contract["meta"]["system_drift"] = drift_int
+        
+        if abs(drift_int) > 5: 
+            contract["meta"]["system_drift"] = drift_int
+            
         if abs(drift_int) > CLOCK_DRIFT_LIMIT:
              contract["reason"] = f"System Clock Mismatch ({drift_int}s)"
              return contract
@@ -132,16 +143,15 @@ def calculate_rules(data_pack):
     df_15m['EMA_50']  = df_15m.ta.ema(length=50)
     df_15m['EMA_200'] = df_15m.ta.ema(length=200)
     
-    # [NEW] ADX + DMP/DMN Extraction
-    # pandas_ta return: ADX_14, DMP_14, DMN_14
+    # [FIX] Robust ADX Extraction
     adx_df = df_15m.ta.adx(length=14)
     
+    # Default values biar variable ke-define
     df_15m['ADX'] = 0
     df_15m['DMP'] = 0
     df_15m['DMN'] = 0
 
     if adx_df is not None and not adx_df.empty:
-        # Cari kolom dinamis
         col_adx = [c for c in adx_df.columns if c.startswith("ADX")]
         col_dmp = [c for c in adx_df.columns if c.startswith("DMP")]
         col_dmn = [c for c in adx_df.columns if c.startswith("DMN")]
@@ -150,12 +160,17 @@ def calculate_rules(data_pack):
             df_15m['ADX'] = adx_df[col_adx[0]]
             df_15m['DMP'] = adx_df[col_dmp[0]]
             df_15m['DMN'] = adx_df[col_dmn[0]]
+        else:
+            # [NEW] Warning kalau kolom tidak ditemukan
+            contract["meta"]["warnings"].append("ADX Columns Not Found (Using 0)")
+    else:
+        contract["meta"]["warnings"].append("ADX Calculation Failed (Using 0)")
 
     last_5m  = df_5m.iloc[-1]
     prev_5m  = df_5m.iloc[-2]
     last_15m = df_15m.iloc[-1]
 
-    if pd.isna(last_5m['ATR']) or pd.isna(last_15m['EMA_200']) or pd.isna(last_15m['ADX']):
+    if pd.isna(last_5m['ATR']) or pd.isna(last_15m['EMA_200']):
         contract["reason"] = "Indicators Calculating (NaN)..."
         return contract
 
@@ -181,7 +196,6 @@ def calculate_rules(data_pack):
     spread       = tick.get('spread', 999)
     stop_level   = tick.get('stop_level', 0)
     freeze_level = tick.get('freeze_level', 0)
-    
     contract["meta"]["spread"] = spread
 
     if stop_level > ABNORMAL_LEVEL_THRESHOLD or freeze_level > ABNORMAL_LEVEL_THRESHOLD:
@@ -195,21 +209,19 @@ def calculate_rules(data_pack):
         return contract
 
     # ==========================================
-    # 📈 6. LOGIKA STRATEGI (Ultimate Trend Check)
+    # 📈 6. LOGIKA STRATEGI (ADX + DIRECTION)
     # ==========================================
 
-    # A. Trend Logic: EMA + ADX + DIRECTION (DMP/DMN)
     strong_bull = (last_15m['Close'] > last_15m['EMA_50']) and \
                   (last_15m['EMA_50'] > last_15m['EMA_200']) and \
                   (last_15m['ADX'] > ADX_THRESHOLD) and \
-                  (last_15m['DMP'] > last_15m['DMN']) # [NEW] Uptrend Confirm
+                  (last_15m['DMP'] > last_15m['DMN'])
 
     strong_bear = (last_15m['Close'] < last_15m['EMA_50']) and \
                   (last_15m['EMA_50'] < last_15m['EMA_200']) and \
                   (last_15m['ADX'] > ADX_THRESHOLD) and \
-                  (last_15m['DMN'] > last_15m['DMP']) # [NEW] Downtrend Confirm
+                  (last_15m['DMN'] > last_15m['DMP'])
 
-    # B. Pattern Check
     body     = abs(last_5m['Close'] - last_5m['Open'])
     min_body = last_5m['ATR'] * MIN_BODY_ATR
     
@@ -228,29 +240,32 @@ def calculate_rules(data_pack):
                   (last_5m['RSI'] > 30)
 
     # ==========================================
-    # 🚀 7. EKSEKUSI & LEVEL (Price-Aware)
+    # 🚀 7. EKSEKUSI & LEVEL (Price-Aware + Cap)
     # ==========================================
     
     def to_points(val): return val / point
 
-    # Hitung Jarak SL Minimal
     min_dist_req    = stop_level + freeze_level + spread + BUFFER_STOP_LEVEL
     min_sl_dist_pts = max(min_dist_req, MIN_ABS_STOP_DIST)
 
-    # [NEW] Adaptive Safe Distance dengan PRICE FLOOR
-    # Konversi Price (0.50) ke Points sesuai broker digit
-    min_safe_pts = MIN_SAFE_DIST_PRICE / point 
+    # [NEW] Adaptive Safe Distance logic with FLOOR & CAP
+    # 1. Hitung base distance dari ATR
+    raw_safe_dist_price = last_5m['ATR'] * SAFE_DIST_ATR
     
-    raw_safe_dist = to_points(last_5m['ATR'] * SAFE_DIST_ATR)
-    adaptive_safe_dist_pts = max(raw_safe_dist, min_safe_pts)
+    # 2. Apply Floor ($0.50) & Cap ($2.00)
+    safe_dist_price = max(MIN_SAFE_DIST_PRICE, min(MAX_SAFE_DIST_PRICE, raw_safe_dist_price))
+    
+    # 3. Convert ke Points
+    adaptive_safe_dist_pts = to_points(safe_dist_price)
 
     # --- SETUP BUY ---
     if bull_engulf and strong_bull:
         dist_pdh_pts = to_points(hist['pdh'] - tick['ask'])
         
+        # [FIX] Display pake .1f biar cantik di log
         if 0 < dist_pdh_pts < (adaptive_safe_dist_pts - EPS):
             contract["signal"] = "SKIP"
-            contract["reason"] = f"Near PDH ({int(dist_pdh_pts)} < {int(adaptive_safe_dist_pts)} pts)"
+            contract["reason"] = f"Near PDH ({dist_pdh_pts:.1f} < {adaptive_safe_dist_pts:.1f} pts)"
             return contract
 
         entry       = tick['ask']
@@ -278,7 +293,7 @@ def calculate_rules(data_pack):
         
         if 0 < dist_pdl_pts < (adaptive_safe_dist_pts - EPS):
             contract["signal"] = "SKIP"
-            contract["reason"] = f"Near PDL ({int(dist_pdl_pts)} < {int(adaptive_safe_dist_pts)} pts)"
+            contract["reason"] = f"Near PDL ({dist_pdh_pts:.1f} < {adaptive_safe_dist_pts:.1f} pts)"
             return contract
 
         entry       = tick['bid']
