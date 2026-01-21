@@ -3,221 +3,200 @@ import pandas_ta as ta
 import pytz
 from datetime import datetime
 
-# --- KONFIGURASI (Production Config) ---
-# Timezone
+# --- KONFIGURASI ---
 WIB = pytz.timezone('Asia/Jakarta')
-
-# Trading Rules
-SESSION_START_HOUR = 14  # Jam 14.00 WIB
-SESSION_END_HOUR = 23    # Jam 23.00 WIB
-MAX_SPREAD_POINTS = 35   # Configurable di .env
-SAFE_DIST_POINTS = 200   # Jarak aman ke PDH/PDL
-MIN_BODY_ATR = 0.3       # Filter Doji
-
-# Risk Rules
-ATR_SL_MULT = 1.5        # SL = 1.5x ATR
-RR_RATIO = 2.0           # TP = 2x Risk
-MIN_STOP_LEVEL = 10      # Jarak minimum SL dari Entry (Points) - Jaga2 kalau broker nolak
+SESSION_START = 14 
+SESSION_END = 23
+MAX_SPREAD = 35 
+MIN_BODY_ATR = 0.3
+SAFE_DIST_POINTS = 200 
+ATR_SL_MULT = 1.5
+RR_RATIO = 2.0
 
 def calculate_rules(data_pack):
     # ---------------------------------------------------------
-    # 0. INITIALIZE CONTRACT (Template Output Default)
-    # Biar downstream (AI/Telegram) gak error KeyMissing
+    # 0. CONTRACT INITIALIZATION
     # ---------------------------------------------------------
     contract = {
         "signal": "NO",
-        "reason": "Initializing...",
+        "reason": "Init",
         "setup": {},
         "timestamp": None,
-        "tick": data_pack.get('tick', {}),
+        "tick": {},
         "df_5m": pd.DataFrame(),
-        "meta": {"spread": 0, "session": False}
+        "meta": {}
     }
 
-    # 1. DATA GUARD
-    if not data_pack or 'm5' not in data_pack or 'm15' not in data_pack:
+    # 1. CRITICAL DATA GUARD
+    if not data_pack or 'tick' not in data_pack:
         contract["reason"] = "Data Empty"
+        return contract
+
+    tick = data_pack['tick']
+    
+    # Kunci Mati: Kalau point/digit 0 atau None, matikan bot.
+    if not tick.get('point') or not tick.get('digits'):
+        contract["reason"] = "CRITICAL: Tick Point/Digits Missing"
         return contract
 
     df_5m = data_pack['m5'].copy()
     df_15m = data_pack['m15'].copy()
-    tick = data_pack.get('tick', {})
     hist = data_pack.get('history', {})
-    
-    # Isi DataFrame ke kontrak buat chart nanti
     contract["df_5m"] = df_5m
+    contract["tick"] = tick
 
-    # Validasi Panjang Data
-    if len(df_5m) < 60 or len(df_15m) < 60:
-        contract["reason"] = "Not Enough Data"
+    # ---------------------------------------------------------
+    # 2. TIME & SESSION (Epoch Based)
+    # ---------------------------------------------------------
+    try:
+        # Server kirim epoch (int/float), pasti UTC.
+        last_ts = df_5m.index[-1] 
+        # Convert ke Datetime UTC Aware
+        utc_dt = pd.to_datetime(last_ts, unit='s').replace(tzinfo=pytz.utc)
+        # Convert ke WIB
+        wib_dt = utc_dt.astimezone(WIB)
+        
+        contract["timestamp"] = wib_dt
+        contract["meta"]["session"] = False
+
+        if not (SESSION_START <= wib_dt.hour < SESSION_END):
+            contract["reason"] = f"Outside Session ({wib_dt.hour}:00)"
+            return contract
+            
+        contract["meta"]["session"] = True
+    except Exception as e:
+        contract["reason"] = f"Time Error: {e}"
         return contract
 
     # ---------------------------------------------------------
-    # 2. HITUNG INDIKATOR
+    # 3. INDICATORS
     # ---------------------------------------------------------
-    # M5
     df_5m['EMA_50'] = df_5m.ta.ema(length=50)
     df_5m['ATR'] = df_5m.ta.atr(length=14)
     df_5m['RSI'] = df_5m.ta.rsi(length=14)
     
-    # M15
     df_15m['EMA_50'] = df_15m.ta.ema(length=50)
-    df_15m['EMA_200'] = df_15m.ta.ema(length=200) # (Buat trend filter advanced)
+    df_15m['EMA_200'] = df_15m.ta.ema(length=200) # Strong Trend Filter
 
     last_5m = df_5m.iloc[-1]
+    prev_5m = df_5m.iloc[-2]
     last_15m = df_15m.iloc[-1]
 
-    # Guard NaN Indikator
-    if pd.isna(last_5m['ATR']) or pd.isna(last_5m['EMA_50']):
-        contract["reason"] = "Indicators Loading (NaN)"
+    if pd.isna(last_5m['ATR']):
+        contract["reason"] = "Indikator Loading..."
         return contract
 
     # ---------------------------------------------------------
-    # 3. TIME & SESSION HANDLING (Robust)
+    # 4. FILTERS (Spread & Trend)
     # ---------------------------------------------------------
-    # Asumsi index DataFrame adalah datetime (UTC/Naive dari server ZMQ)
-    try:
-        ts = last_5m.name
-        # Kalau Naive (polos), kasih UTC dulu
-        if ts.tzinfo is None:
-            ts = ts.replace(tzinfo=pytz.utc)
-        
-        # Convert ke WIB
-        candle_time_wib = ts.astimezone(WIB)
-        contract["timestamp"] = candle_time_wib
-        
-        current_hour = candle_time_wib.hour
-        is_session = (SESSION_START_HOUR <= current_hour < SESSION_END_HOUR)
-        contract["meta"]["session"] = is_session
-        
-        if not is_session:
-            contract["signal"] = "NO"
-            contract["reason"] = f"Outside Killzone ({current_hour}:00 WIB)"
-            return contract
-            
-    except Exception as e:
-        contract["reason"] = f"Timezone Error: {e}"
-        return contract
-
-    # ---------------------------------------------------------
-    # 4. SPREAD FILTER
-    # ---------------------------------------------------------
-    spread = tick.get('spread', 999)
-    contract["meta"]["spread"] = spread
-    
-    if spread > MAX_SPREAD_POINTS:
+    if tick['spread'] > MAX_SPREAD:
         contract["signal"] = "SKIP"
-        contract["reason"] = f"High Spread: {spread} pts"
+        contract["reason"] = f"Spread {tick['spread']} > {MAX_SPREAD}"
         return contract
 
-    # ---------------------------------------------------------
-    # 5. PATTERN & TREND LOGIC
-    # ---------------------------------------------------------
-    # Trend M15 (Sekarang pakai EMA 50 & 200 buat strong trend)
-    is_bull_trend = (last_15m['Close'] > last_15m['EMA_50'])
-    is_bear_trend = (last_15m['Close'] < last_15m['EMA_50'])
+    # Strong Trend Definition (EMA 50 & 200)
+    # Bull: Harga > EMA50 DAN EMA50 > EMA200
+    bull_trend_15m = (last_15m['Close'] > last_15m['EMA_50']) and (last_15m['EMA_50'] > last_15m['EMA_200'])
     
-    # Pattern Quality M5
-    body_size = abs(last_5m['Close'] - last_5m['Open'])
+    # Bear: Harga < EMA50 DAN EMA50 < EMA200
+    bear_trend_15m = (last_15m['Close'] < last_15m['EMA_50']) and (last_15m['EMA_50'] < last_15m['EMA_200'])
+
+    # ---------------------------------------------------------
+    # 5. PATTERN RECOGNITION (Confirm Close)
+    # ---------------------------------------------------------
+    body = abs(last_5m['Close'] - last_5m['Open'])
     min_body = last_5m['ATR'] * MIN_BODY_ATR
     
-    prev_5m = df_5m.iloc[-2]
-    
-    # Bullish Engulfing + Quality Gate
+    # Bullish Engulfing Valid:
+    # 1. Candle Hijau nelen Merah
+    # 2. Body gede (bukan doji)
+    # 3. RSI aman (<70)
+    # 4. CONFIRM: Close sekarang > High candle sebelumnya (Breakout micro structure)
     bull_engulf = (last_5m['Close'] > last_5m['Open']) and \
                   (last_5m['Open'] < prev_5m['Close']) and \
                   (last_5m['Close'] > prev_5m['Open']) and \
-                  (body_size > min_body) and \
-                  (last_5m['RSI'] < 70) # Gak Overbought parah
+                  (body > min_body) and \
+                  (last_5m['RSI'] < 70) and \
+                  (last_5m['Close'] > prev_5m['High']) 
 
-    # Bearish Engulfing + Quality Gate
+    # Bearish Engulfing Valid:
+    # 4. CONFIRM: Close sekarang < Low candle sebelumnya
     bear_engulf = (last_5m['Close'] < last_5m['Open']) and \
                   (last_5m['Open'] > prev_5m['Close']) and \
                   (last_5m['Close'] < prev_5m['Open']) and \
-                  (body_size > min_body) and \
-                  (last_5m['RSI'] > 30) # Gak Oversold parah
+                  (body > min_body) and \
+                  (last_5m['RSI'] > 30) and \
+                  (last_5m['Close'] < prev_5m['Low'])
 
     # ---------------------------------------------------------
-    # 6. SIGNAL GENERATION + LEVEL CHECK
+    # 6. EXECUTION LOGIC
     # ---------------------------------------------------------
-    point = tick.get('point', 0.001)
-    digits = tick.get('digits', 2)
+    point = tick['point']
+    digits = tick['digits']
+    stop_level = tick.get('stop_level', 0) # Ambil dari broker
     
-    def get_points(p1, p2): return (p1 - p2) / point
+    # Safety Buffer buat Stop Level (Stop Level + Spread + 10 points)
+    min_sl_dist = (stop_level * point) + (tick['spread'] * point) + (10 * point)
+
+    def to_points(val): return val / point
 
     # --- BUY SETUP ---
-    if bull_engulf and is_bull_trend:
-        # Cek Jarak ke Resistance (PDH)
-        # Dist positif = belum breakout. Dist negatif = udah breakout.
-        dist_pdh = get_points(hist['pdh'], tick['ask'])
-        
-        # Kalau belum breakout DAN deket banget, SKIP
+    if bull_engulf and bull_trend_15m:
+        # PDH Check
+        dist_pdh = to_points(hist['pdh'] - tick['ask']) # Positif = Belum breakout
         if 0 < dist_pdh < SAFE_DIST_POINTS:
             contract["signal"] = "SKIP"
-            contract["reason"] = f"Too Close to PDH ({int(dist_pdh)} pts)"
+            contract["reason"] = f"Near PDH Resistance ({int(dist_pdh)} pts)"
             return contract
-            
-        # Hitung SL/TP (ATR Based)
-        atr_val = last_5m['ATR']
-        entry_price = tick['ask'] # Entry di ASK
-        
-        # SL di bawah Low - Buffer
-        # Pake ATR murni buat jarak, bukan Close-Low
-        sl_dist = atr_val * ATR_SL_MULT
-        sl_price = entry_price - sl_dist
-        
-        # Guard: Stop Level Broker
-        if get_points(entry_price, sl_price) < MIN_STOP_LEVEL:
-             sl_price = entry_price - (MIN_STOP_LEVEL * point)
 
-        risk = entry_price - sl_price
-        tp_price = entry_price + (risk * RR_RATIO)
+        entry = tick['ask']
+        sl_dist = last_5m['ATR'] * ATR_SL_MULT
+        
+        # Guard Stop Level
+        if sl_dist < min_sl_dist: sl_dist = min_sl_dist
+        
+        sl = entry - sl_dist
+        tp = entry + (sl_dist * RR_RATIO)
         
         contract["signal"] = "BUY"
-        contract["reason"] = "Valid Bullish Engulfing"
+        contract["reason"] = "Strong Bullish Engulfing + Trend"
         contract["setup"] = {
             "action": "BUY",
-            "entry": round(entry_price, digits),
-            "sl": round(sl_price, digits),
-            "tp": round(tp_price, digits),
-            "atr": round(atr_val, digits)
+            "entry": round(entry, digits),
+            "sl": round(sl, digits),
+            "tp": round(tp, digits),
+            "atr": round(last_5m['ATR'], digits)
         }
 
     # --- SELL SETUP ---
-    elif bear_engulf and is_bear_trend:
-        # Cek Jarak ke Support (PDL)
-        dist_pdl = get_points(tick['bid'], hist['pdl'])
-        
+    elif bear_engulf and bear_trend_15m:
+        # PDL Check
+        dist_pdl = to_points(tick['bid'] - hist['pdl']) # Positif = Belum breakdown
         if 0 < dist_pdl < SAFE_DIST_POINTS:
             contract["signal"] = "SKIP"
-            contract["reason"] = f"Too Close to PDL ({int(dist_pdl)} pts)"
+            contract["reason"] = f"Near PDL Support ({int(dist_pdl)} pts)"
             return contract
-            
-        # Hitung SL/TP
-        atr_val = last_5m['ATR']
-        entry_price = tick['bid'] # Entry di BID
-        
-        sl_dist = atr_val * ATR_SL_MULT
-        sl_price = entry_price + sl_dist
+
+        entry = tick['bid']
+        sl_dist = last_5m['ATR'] * ATR_SL_MULT
         
         # Guard Stop Level
-        if get_points(sl_price, entry_price) < MIN_STOP_LEVEL:
-            sl_price = entry_price + (MIN_STOP_LEVEL * point)
+        if sl_dist < min_sl_dist: sl_dist = min_sl_dist
 
-        risk = sl_price - entry_price
-        tp_price = entry_price - (risk * RR_RATIO)
+        sl = entry + sl_dist
+        tp = entry - (sl_dist * RR_RATIO)
         
         contract["signal"] = "SELL"
-        contract["reason"] = "Valid Bearish Engulfing"
+        contract["reason"] = "Strong Bearish Engulfing + Trend"
         contract["setup"] = {
             "action": "SELL",
-            "entry": round(entry_price, digits),
-            "sl": round(sl_price, digits),
-            "tp": round(tp_price, digits),
-            "atr": round(atr_val, digits)
+            "entry": round(entry, digits),
+            "sl": round(sl, digits),
+            "tp": round(tp, digits),
+            "atr": round(last_5m['ATR'], digits)
         }
-    
+
     else:
-        contract["reason"] = "No Valid Pattern"
+        contract["reason"] = "No Valid Setup"
 
     return contract
