@@ -1,12 +1,15 @@
+
 import json
 import os
 import time
 from datetime import datetime, timezone
 
-FILE_PATH = "signal_state.json"
+# --- ABSOLUTE PATH SETUP ---
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+FILE_PATH = os.path.join(BASE_DIR, "signal_state.json")
 
 def save_state_atomic(active, sig_type=None, sl=0, tp=0, entry=0, reason="", candle_ts=0):
-    """Save state Atomic dengan Wall-Clock Time untuk Expiry yang aman"""
+    """Save state Atomic dengan Wall-Clock Time"""
     state = {
         "active": active,
         "type": sig_type,
@@ -15,7 +18,7 @@ def save_state_atomic(active, sig_type=None, sl=0, tp=0, entry=0, reason="", can
         "tp": float(tp),
         "reason": str(reason),
         "opened_at_candle_ts": int(candle_ts),
-        "opened_at_wall_ts": int(time.time()), # Jam PC (Anti broker jump)
+        "opened_at_wall_ts": int(time.time()),
         "updated_at": datetime.now(timezone.utc).isoformat()
     }
     temp_file = FILE_PATH + ".tmp"
@@ -25,22 +28,31 @@ def save_state_atomic(active, sig_type=None, sl=0, tp=0, entry=0, reason="", can
         os.fsync(f.fileno())
     os.replace(temp_file, FILE_PATH)
 
-def check_signal_status(high, low, current_candle_ts):
-    """Cek status dengan return string eksplisit (Anti Ambigu)"""
-    if not os.path.exists(FILE_PATH): return "NONE"
+def check_signal_status(high, low):
+    """Cek status dengan Fail-Safe: Rusak = Lock (STILL_OPEN)"""
+    if not os.path.exists(FILE_PATH): 
+        return "NONE"
+        
     try:
         with open(FILE_PATH, "r") as f:
             state = json.load(f)
-    except: return "NONE"
+    except Exception:
+        # FAIL-SAFE: Jika file corrupt, kunci sistem (jangan biarkan entry baru)
+        print("🚨 STATE CORRUPT: Locking system for safety!")
+        return "STILL_OPEN"
 
-    if not state.get("active"): return "NONE"
+    if not state.get("active"): 
+        return "NONE"
 
-    # --- 1. DOUBLE-CLOCK EXPIRY (4 Jam / 14400 Detik) ---
-    # Cek berdasarkan Jam PC (Wall time) lebih aman dari broker jump
+    # --- GUARD SL/TP & TYPE ---
+    if state.get("type") not in ["BUY", "SELL"]: return "NONE"
+    if not state.get("sl") or not state.get("tp"): return "STILL_OPEN"
+
+    # --- EXPIRY (Jam PC) ---
     if int(time.time()) - state.get("opened_at_wall_ts", 0) > 14400:
         return "EXPIRED"
 
-    # --- 2. HIT DETECTION ---
+    # --- HIT DETECTION ---
     if state["type"] == "BUY":
         if high >= state["tp"]: return "TP_HIT"
         if low <= state["sl"]: return "SL_HIT"
