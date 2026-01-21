@@ -5,75 +5,41 @@ from src.config import GEMINI_API_KEY
 genai.configure(api_key=GEMINI_API_KEY)
 model = genai.GenerativeModel('gemini-1.5-flash')
 
-def run_debate(data, history):
-    # Gabungin data teknikal & sejarah jadi string padat
-    context_str = f"""
-    ASSET: XAUUSD (Gold)
-    CURRENT PRICE: {data['price']:.2f}
+def run_debate(setup_data):
+    # Setup data isinya entry, sl, tp, reason dari Rule Engine
     
-    1. MARKET STRUCTURE (TIME FRAMES):
-       - 1M (Micro): Pattern {", ".join(data['patterns']) if data['patterns'] else "None"}, Trend {data['trend_1m']}
-       - 5M (Tactical): Trend {data['trend_5m']}, RSI {data['rsi_5m']:.1f}
-       - 15M (Bias): Trend {data['trend_15m']}
-       
-    2. KEY LEVELS (HISTORICAL):
-       - Prev Day High: {history['daily']['pdh']} | Low: {history['daily']['pdl']}
-       - Weekly Range: {history['weekly']['range_low']} - {history['weekly']['range_high']}
-       
-    3. CORRELATION:
-       - DXY (Dollar): Trend {data['dxy_trend']} (Negative correlation expected)
-    """
-
     prompt = f"""
-    ROLE: Elite Algorithmic Trading Council. You are NOT a chat assistant. You are a JSON generator for a trading engine.
-    OBJECTIVE: Analyze the data and output a trading decision with strict numerical scoring.
-
-    AGENTS:
-    1. 🐺 SNIPER (Bull Score 0-100): Rates buying pressure based on Patterns & 1M/5M alignment.
-    2. 🐻 BEAR (Bear Score 0-100): Rates selling pressure based on Resistance & DXY strength.
-    3. 🛡️ RISK MANAGER (Status: SAFE/CAUTION/DANGER): Checks historical levels (Don't buy at resistance!) and DXY correlation.
-    4. ⚖️ REFEREE: Final Decision based on (Bull Score - Bear Score) and Risk Status.
-
-    LOGIC RULES:
-    - IF Risk Status is "DANGER", Decision MUST be "SKIP".
-    - IF DXY is Bullish, Gold Buy Score must be penalized.
-    - IF Price is near Prev Day High, Buy Score must be penalized (Resistance).
-    - RuleScore is the overall quality of the technical setup (0-100).
-
-    OUTPUT FORMAT (STRICT JSON ONLY, NO TEXT):
-    {{
-        "decision": "BUY" or "SELL" or "SKIP",
-        "scores": {{
-            "rule_score": 0-100,
-            "bull_score": 0-100,
-            "bear_score": 0-100
-        }},
-        "risk": {{
-            "status": "SAFE" or "CAUTION" or "DANGER",
-            "reason": "Max 5 words explanation"
-        }},
-        "setup": {{
-            "entry": {data['price']:.2f},
-            "sl": "price",
-            "tp": "price"
-        }},
-        "summary": [
-            "Point 1: Sniper's main argument",
-            "Point 2: Strategist's main concern/support",
-            "Point 3: Risk Manager's verdict",
-            "Point 4: Correlation check (DXY/MTF)"
-        ]
-    }}
+    ROLE: Algorithmic Trading Supervisor (XAUUSD Scalping).
     
-    DATA TO ANALYZE:
-    {context_str}
+    PROPOSED SETUP (FROM RULE ENGINE):
+    - Action: {setup_data['action']}
+    - Entry: {setup_data['entry']} | SL: {setup_data['sl']} | TP: {setup_data['tp']}
+    - Technical Reason: {setup_data['reason']}
+    - Volatility (ATR): {setup_data['atr']}
+    
+    AGENTS:
+    1. 🐂 BULL AGENT & 🐻 BEAR AGENT: Debate the technical strength.
+    2. 🛡️ RISK MANAGER: Checks if SL is too tight/wide based on ATR, or if setup looks like a liquidity trap.
+    3. ⚖️ REFEREE: Final decision.
+    
+    CRITICAL RULES:
+    - If Risk Manager Fails, Decision MUST be SKIP.
+    - If (Bull Score - Bear Score) < 20, Decision is SKIP (Weak consensus).
+    
+    OUTPUT FORMAT (JSON ONLY):
+    {{
+        "bull_score": 0-100,
+        "bear_score": 0-100,
+        "risk_status": "PASS" or "FAIL",
+        "risk_reason": "Short reason",
+        "referee_decision": "TRADE" or "SKIP",
+        "summary": "3 bullet points summary"
+    }}
     """
     
     try:
         response = model.generate_content(prompt)
-        # Bersihin output biar jadi murni JSON
-        clean_json = response.text.replace("```json", "").replace("```", "").strip()
-        return json.loads(clean_json)
-    except Exception as e:
-        print(f"❌ AI Brain Error: {e}")
+        clean_text = response.text.replace("```json", "").replace("```", "").strip()
+        return json.loads(clean_text)
+    except:
         return None
