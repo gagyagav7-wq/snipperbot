@@ -43,40 +43,50 @@ def calculate_rules(data_pack):
         contract["reason"] = "Data Empty"
         return contract
 
+    # ... (bagian atas sama) ...
+
     meta = data_pack.get("meta", {})
     server_time = meta.get("server_time")
-    
-    # [GUARD 1] Real Stale Feed Check (Millisecond Precision)
-    tick_time_msc = meta.get("tick_time_msc") # Ambil yg MS
-    local_time = time.time() # Float (ada koma detiknya)
-    
-    if tick_time_msc:
-        # Convert Broker MS ke Seconds Float
-        broker_ts = tick_time_msc / 1000.0 
+    local_time = time.time()
+
+    # [GUARD 1] Robust Stale Feed & Clock Sync Check
+    tick_time_msc = meta.get("tick_time_msc")
+    tick_time_sec = meta.get("tick_time")
+    broker_ts = None
+
+    # Logic: Prioritas MS -> Fallback ke Detik
+    if tick_time_msc and tick_time_msc > 0:
+        broker_ts = tick_time_msc / 1000.0
+    elif tick_time_sec and tick_time_sec > 0:
+        broker_ts = float(tick_time_sec)
+
+    if broker_ts:
         data_lag = local_time - broker_ts
         
-        # A. Check Stale (Data Basi)
+        # A. Check Stale (Data Basi > 30s)
         if data_lag > STALE_FEED_THRESHOLD:
-            contract["reason"] = f"BROKER LAG ({data_lag:.2f}s)"
+            contract["reason"] = f"BROKER LAG ({data_lag:.2f}s) - Check MT5 Connection"
             return contract
             
-        # B. Check Future Tick (Clock Drift / Timezone Ngaco)
-        # Toleransi -2 detik (takutnya network jitter)
-        if data_lag < -2.0:
-            contract["reason"] = f"FUTURE TICK DETECTED (Lag: {data_lag:.2f}s). Check PC Clock!"
+        # B. Check Future Tick (Clock Drift)
+        # Zone 1: Warning (-2s s/d -10s) -> Masih boleh jalan tapi catat log
+        if -10.0 < data_lag < -2.0:
+            contract["meta"]["warning"] = f"Clock Drift Detected ({data_lag:.2f}s)"
+            
+        # Zone 2: Kill Zone (< -10s) -> Data masa depan terlalu jauh, LOCK.
+        elif data_lag <= -10.0:
+            contract["reason"] = f"CRITICAL: PC Clock Behind Broker ({data_lag:.2f}s). RESYNC TIME!"
             return contract
 
-    # [GUARD 2] Clock Drift Check (System Integrity)
+    # [GUARD 2] System Clock Integrity (Server vs Client)
     if server_time:
-        drift = int(local_time) - server_time
-        # Warning di Log kalau drift mulai kerasa (> 5 detik)
-        if abs(drift) > 5:
-             contract["meta"]["clock_drift"] = drift
-        
-        # Kill Switch kalau drift parah (> 30 detik)
+        drift = local_time - server_time
+        if abs(drift) > 5: contract["meta"]["system_drift"] = drift
         if abs(drift) > 30:
-             contract["reason"] = f"SYSTEM CLOCK MISMATCH ({drift}s)"
+             contract["reason"] = f"System Clock Mismatch ({drift}s)"
              return contract
+
+    # ... (lanjut ke validasi tick, point, digits di bawahnya) ...
 
     # ... (lanjut ke tick validation bid/ask, copy paste yg lama) ...
     
