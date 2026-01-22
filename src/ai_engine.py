@@ -3,7 +3,6 @@ import json
 import os
 import re
 
-# Load model sekali saja
 MODEL = None
 
 def init_ai():
@@ -17,25 +16,27 @@ def ask_ai_judge(signal_type, bot_reason, metrics):
     if MODEL is None: init_ai()
     if MODEL is None: return {"decision": "REJECT", "reason": "AI Config Error"}
 
-    # Prompt Spesial Scalping SMC + Elliott Wave
+    # Prompt Khusus Scalping XAUUSD (SMC + EW Bias)
     prompt = f"""
-    Act as a World-Class XAUUSD Scalper specializing in Smart Money Concepts (SMC) and Elliott Wave Theory.
+    Role: Professional XAUUSD Scalper (SMC & Elliott Wave Expert).
     
     Signal: {signal_type}
-    Technical Reason: {bot_reason}
-    Market Context: {json.dumps(metrics)}
+    Reason: {bot_reason}
+    Metrics: {json.dumps(metrics)}
     
-    Your Task:
-    1. SMC Check: Is the price reacting to a valid Order Block or FVG? (Check 'dist_ob' in metrics).
-    2. Elliott Wave Check: Based on the 'trend' (EMA), are we likely in a corrective wave (risky) or impulsive wave (safe)?
-    3. Scalping Risk: Reject if the setup seems to be against a strong higher timeframe momentum.
+    Task: Validate this scalping setup (Target 30-50 pips).
+    
+    Checklist:
+    1. Trend Context: Is the trade aligned with the immediate momentum?
+    2. Elliott Wave Bias: Does this look like a risky corrective wave (Wave 2/4/B)? If yes, REJECT.
+    3. Price Action: Is there a clear rejection/reaction?
     
     Output JSON ONLY:
     {{
       "decision": "APPROVE" or "REJECT",
       "confidence": 0-100,
-      "reason": "Explain using SMC terms (e.g., 'Valid retest of bullish OB', 'Counter-trend correction wave detected')",
-      "wave_analysis": "Brief Elliott Wave bias (e.g., 'Wave 3 impulse probable')"
+      "reason": "Technical reason in 10 words (e.g. 'Valid impulse wave 3, clear rejection')",
+      "wave_bias": "Impulse/Correction/Unknown"
     }}
     """
 
@@ -45,4 +46,5 @@ def ask_ai_judge(signal_type, bot_reason, metrics):
         match = re.search(r'\{.*\}', text, re.DOTALL)
         return json.loads(match.group()) if match else json.loads(text)
     except:
-        return {"decision": "REJECT", "reason": "AI Parsing Error"}
+        # Fallback aman: Kalau AI bingung, mending jangan trading
+        return {"decision": "REJECT", "reason": "AI Error / Ambiguous Data"}
