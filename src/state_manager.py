@@ -3,6 +3,7 @@ import os
 import time
 from datetime import datetime, timezone
 
+# --- CONFIG ---
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 FILE_PATH = os.path.join(BASE_DIR, "signal_state.json")
 
@@ -33,44 +34,42 @@ def save_state_atomic(active, sig_type=None, sl=0.0, tp=0.0, entry=0.0, reason="
         return False
 
 def check_signal_status(high, low, current_bid=0, current_ask=0):
-    """
-    Status Check dengan Partial Tick Support (Bid/Ask Independent)
-    """
     if not os.path.exists(FILE_PATH): return "NONE"
     
     try:
         with open(FILE_PATH, "r") as f:
             state = json.load(f)
     except:
+        # Fail-Safe Lock
         ts = int(time.time())
         try: os.rename(FILE_PATH, f"{FILE_PATH}.corrupt.{ts}")
         except: pass
-        return "STILL_OPEN" # Fail-safe lock
+        return "STILL_OPEN"
 
     if not state.get("active"): return "NONE"
-    
+
+    # --- TYPE GUARD (Patch Baru) ---
+    stype = state.get("type")
+    if stype not in ["BUY", "SELL"]: 
+        return "NONE" # Data korup/hantu, anggap kosong
+
     # --- EXPIRY CHECK ---
     if int(time.time()) - state.get("opened_at_wall_ts", 0) > 14400:
         return "EXPIRED"
 
     sl = state.get("sl", 0)
     tp = state.get("tp", 0)
-    stype = state.get("type")
+    
+    if not sl or not tp: return "STILL_OPEN" 
 
-    if not sl or not tp: return "STILL_OPEN" # Guard data kosong
-
-    # --- 1. REALTIME CHECK (PARTIAL TICK) ---
-    if stype == "BUY":
-        # Buy Exit butuh BID (Harga jual kita)
-        if current_bid > 0:
-            if current_bid >= tp: return "TP_HIT"
-            if current_bid <= sl: return "SL_HIT"
+    # --- 1. REALTIME CHECK (Partial Tick) ---
+    if stype == "BUY" and current_bid > 0:
+        if current_bid >= tp: return "TP_HIT"
+        if current_bid <= sl: return "SL_HIT"
             
-    elif stype == "SELL":
-        # Sell Exit butuh ASK (Harga beli kita)
-        if current_ask > 0:
-            if current_ask <= tp: return "TP_HIT"
-            if current_ask >= sl: return "SL_HIT"
+    elif stype == "SELL" and current_ask > 0:
+        if current_ask <= tp: return "TP_HIT"
+        if current_ask >= sl: return "SL_HIT"
 
     # --- 2. CANDLE CHECK (Backup) ---
     if stype == "BUY":
