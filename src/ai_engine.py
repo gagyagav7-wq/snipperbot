@@ -20,6 +20,8 @@ def ask_ai_judge(signal_type, bot_reason, metrics):
     m15_data = metrics.get('m15_structure', {})
     rel_pos = m15_data.get('relative_pos', 0.5)
 
+    # (Update Prompt ini)
+
     prompt = f"""
     Role: Senior SMC & Elliott Wave Strategist (XAUUSD Scalping).
     
@@ -27,25 +29,30 @@ def ask_ai_judge(signal_type, bot_reason, metrics):
     Reason: {bot_reason}
     Metrics: {json.dumps(metrics)}
     
-    M15 Context (Relative Position): {rel_pos:.2f} (0.0=Low, 1.0=High)
+    Context Data:
+    - Recent Pivots (M15): {metrics.get('m15_pivots')}
+    - Trend: {metrics.get('trend_m15')}
     
-    Task: Validate Trade Safety.
+    Task: Validate Structure.
     
-    ELLIOTT WAVE LOGIC:
-    - If BUYING and Relative Position > 0.85: HIGH RISK (Likely Wave 5 top or Wave B correction). -> REJECT or CAUTION.
-    - If SELLING and Relative Position < 0.15: HIGH RISK (Likely Wave 5 bottom). -> REJECT or CAUTION.
-    - Ideally, we want to catch Wave 3 or Wave C in the middle of the range.
-    
-    DECISION RULES:
-    1. REJECT if price is pushing extremes counter-trend (trying to buy the exact top).
-    2. REJECT if spread is eating >15% of the projected profit (check metrics).
-    3. APPROVE if retest is clean and room to move exists.
+    ELLIOTT WAVE RULES:
+    1. Read the 'm15_pivots'. 
+       - If BUYING: Do we have a Higher High (HH) or Higher Low (HL) sequence? (Good)
+       - If BUYING but pivots show Lower Highs (LH) + Lower Lows (LL): Counter-trend risk! (Reject/Caution)
+       - If SELLING: Look for LH/LL sequence.
+       
+    2. Over-Extension Check:
+       - If price is far above the last High pivot -> Buying Top Risk (Wave 5 end).
+       
+    DECISION:
+    - APPROVE if structure supports the direction (Impulsive move).
+    - REJECT if trying to catch a falling knife (Correction) without clear structure shift.
     
     Output JSON ONLY:
     {{
       "decision": "APPROVE" or "REJECT",
       "confidence": 0-100,
-      "reason": "Brief tech analysis",
+      "reason": "Explain wave structure based on pivots",
       "wave_bias": "Impulse/Correction"
     }}
     """
