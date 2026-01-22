@@ -31,47 +31,21 @@ def send_telegram_html(message):
 
 def run_diagnostics():
     """
-    PRE-FLIGHT CHECK V20: FORT KNOX SAFETY.
-    Cek Tick, Cek Candle Freshness, Cek Unit, Cek Jam.
+    PRE-FLIGHT CHECK V21: ZERO TRUST.
+    Tes Koneksi, Tes Waktu, Tes Data, DAN Tes Otak AI (Live Ping).
     """
-    print("\n🕵️ RUNNING PRE-FLIGHT DIAGNOSTICS (V20 FORT KNOX)...")
+    print("\n🕵️ RUNNING PRE-FLIGHT DIAGNOSTICS (V21 ZERO TRUST)...")
 
     # 1. Cek Koneksi & Data Frame
-    print("[1/6] Checking Market Data Feed...", end=" ")
+    print("[1/7] Checking Market Data Feed...", end=" ")
     data = get_market_data()
     if not data or 'm5' not in data or data['m5'].empty:
-        print("❌ FAILED! (No Data / Empty DataFrame)")
+        print("❌ FAILED! (No Data)")
         return False
     print(f"✅ OK ({len(data['m5'])} candles)")
 
-    # 2. Cek Candle Freshness (PENTING: Anti Data Basi)
-    print("[2/6] Checking Candle Freshness...", end=" ")
-    last_candle_ts = data['m5'].iloc[-1].name
-    # Ensure UTC
-    if getattr(last_candle_ts, "tzinfo", None) is None: 
-        last_candle_ts = last_candle_ts.tz_localize("UTC")
-    
-    candle_age = time.time() - last_candle_ts.timestamp()
-    # M5 candle baru muncul tiap 5 menit (300s). Toleransi max 8 menit (480s).
-    if candle_age > 480:
-        print(f"❌ FAILED! (Stale Candle: {candle_age:.0f}s old). Data feed stuck?")
-        return False
-    print(f"✅ OK (Candle Age: {candle_age:.0f}s)")
-
-    # 3. Cek Integritas Tick
-    print("[3/6] Checking Tick Integrity...", end=" ")
-    tick = data.get("tick", {})
-    bid = float(tick.get("bid", 0) or 0)
-    ask = float(tick.get("ask", 0) or 0)
-    
-    if bid <= 0 or ask <= 0:
-        print(f"❌ FAILED! (Invalid Price: Bid={bid}, Ask={ask})")
-        return False
-    spread = abs(ask - bid)
-    print(f"✅ OK (Bid={bid}, Ask={ask}, Spread={spread:.3f})")
-
-    # 4. Cek Time Sync
-    print("[4/6] Checking Server Time Sync...", end=" ")
+    # 2. Cek Server Time Sync (Basis Kebenaran)
+    print("[2/7] Checking Server Time Sync...", end=" ")
     meta = data.get('meta', {})
     tick_msc = int(meta.get("tick_time_msc") or 0)
     tick_sec = int(meta.get("tick_time") or 0)
@@ -83,55 +57,96 @@ def run_diagnostics():
         return False
 
     lag = time.time() - broker_ts
-    print(f"✅ Data Age: {lag:.3f}s")
+    print(f"✅ Lag: {lag:.3f}s")
 
     if lag < -10:
-        print(f"⛔ FATAL ERROR: Severe Clock Drift ({lag:.3f}s). VPS ahead of Broker!")
+        print(f"⛔ FATAL: Severe Clock Drift ({lag:.3f}s). VPS ahead of Broker!")
         return False
     if lag > 8:
-        print(f"⛔ FATAL ERROR: Critical Lag ({lag:.3f}s). Connection too slow.")
+        print(f"⛔ FATAL: Critical Lag ({lag:.3f}s). Connection too slow.")
         return False
-    if abs(lag) > 2:
-        print(f"⚠️ WARNING: Noticeable Lag ({lag:.3f}s).")
 
-    # 5. Cek Point & Harga (Safe Guard Math)
-    print("[5/6] Checking Price Unit...", end=" ")
+    # 3. Cek Candle Freshness & Timezone Alignment
+    print("[3/7] Checking Candle Validty...", end=" ")
+    last_candle_ts = data['m5'].iloc[-1].name
+    if getattr(last_candle_ts, "tzinfo", None) is None: 
+        last_candle_ts = last_candle_ts.tz_localize("UTC")
+    
+    # Bandingkan Candle Time vs Broker Time (Bukan Jam Laptop)
+    # Candle M5 terakhir harusnya tidak lebih tua dari 10 menit (600s) dari waktu broker
+    candle_gap = broker_ts - last_candle_ts.timestamp()
+    
+    if candle_gap > 600: 
+        print(f"❌ FAILED! Candle vs Broker Gap too big ({candle_gap:.0f}s). Check Timezone/Data Feed!")
+        return False
+    elif candle_gap < -600:
+        print(f"❌ FAILED! Candle is from future? Gap: {candle_gap:.0f}s. Check Timezone!")
+        return False
+        
+    print(f"✅ OK (Gap: {candle_gap:.0f}s)")
+
+    # 4. Cek Integritas Tick
+    print("[4/7] Checking Tick Integrity...", end=" ")
+    tick = data.get("tick", {})
+    bid = float(tick.get("bid", 0) or 0)
+    ask = float(tick.get("ask", 0) or 0)
+    
+    if bid <= 0 or ask <= 0:
+        print(f"❌ FAILED! (Invalid Price)")
+        return False
+    spread = abs(ask - bid)
+    print(f"✅ OK (Spread: {spread:.3f})")
+
+    # 5. Cek Point & Harga
+    print("[5/7] Checking Price Unit...", end=" ")
     last_close = float(data['m5']['Close'].iloc[-1])
     point = float(tick.get("point", 0.01) or 0.01)
     
-    if point <= 0: # Anti Zero Division / Log Error
-        print(f"❌ FAILED! (Invalid Point Value: {point})")
+    if point <= 0:
+        print(f"❌ FAILED! (Invalid Point: {point})")
         return False
-
     if last_close < 100 or last_close > 5000:
         print(f"⚠️ WARNING: Price {last_close} seems weird for XAUUSD.")
     else:
-        print(f"✅ OK (Price: {last_close}, Point: {point})")
+        print(f"✅ OK")
 
-    # 6. Cek AI Key
-    print("[6/6] Checking AI Configuration...", end=" ")
+    # 6. Cek Keberadaan API Key
+    print("[6/7] Checking API Key...", end=" ")
     key = os.getenv("GEMINI_API_KEY")
     if not key:
-        print("❌ FAILED! (No API Key found)")
+        print("❌ FAILED! (No API Key)")
         return False
     print("✅ OK")
+
+    # 7. AI LIVE PING (The Real Brain Check)
+    print("[7/7] Pinging AI Brain...", end=" ")
+    dummy_metrics = {"trend_m15": "NEUTRAL", "price": last_close, "warnings": ["DIAGNOSTIC_TEST"]}
+    try:
+        # Kirim dummy request
+        response = ask_ai_judge("BUY", "SYSTEM_DIAGNOSTIC", dummy_metrics)
+        if "decision" in response:
+            print("✅ ALIVE & THINKING")
+        else:
+            print(f"❌ FAILED! (Invalid Response: {response})")
+            return False
+    except Exception as e:
+        print(f"❌ FAILED! (Connection Error: {e})")
+        return False
 
     print("\n🚀 SYSTEMS GO. STARTING ENGINE...\n")
     time.sleep(1)
     return True
 
 def main():
-    print("="*40 + "\n💀 GOLD KILLER PRO: PLATINUM (V20 FORT KNOX) 💀\n" + "="*40)
+    print("="*40 + "\n💀 GOLD KILLER PRO: V21 (ZERO TRUST) 💀\n" + "="*40)
     
-    # 1. DIAGNOSTIK AWAL (Fail-Closed)
     if not run_diagnostics():
-        msg = "⛔ <b>STARTUP ABORTED</b>\nPre-flight diagnostics failed. Check VPS clock / Data Feed."
+        msg = "⛔ <b>STARTUP ABORTED</b>\nPre-flight diagnostics failed. Check terminal for details."
         print(msg)
         send_telegram_html(msg)
-        return # STOP PROGRAM
+        return
 
-    # 2. KIRIM NOTIFIKASI STARTUP SUKSES
-    send_telegram_html("🚀 <b>SYSTEM STARTED</b>\nDiagnostics Passed. Engine Running.")
+    send_telegram_html("🚀 <b>SYSTEM STARTED (V21)</b>\nAll Systems Green. Trading Active.")
 
     logger = TradeLogger()
     
@@ -139,6 +154,7 @@ def main():
     last_logged_ts = None
     last_ai_fingerprint = None
     last_lag_alert_ts = 0 
+    last_freeze_alert_ts = 0
 
     while True:
         try:
@@ -151,25 +167,36 @@ def main():
             last_bar = df_5m.iloc[-1]
             ts = last_bar.name
             
+            # UTC Safe Check
             if getattr(ts, "tzinfo", None) is None: ts = ts.tz_localize("UTC")
             current_ts = int(ts.timestamp())
+
+            # FIX: Runtime Candle Freshness Guard
+            # Cek umur candle setiap saat, bukan cuma pas start
+            candle_age = time.time() - current_ts
+            if candle_age > 480: # Lebih dari 8 menit (M5)
+                now = time.time()
+                if now - last_freeze_alert_ts > 600: # Alert tiap 10 menit
+                    print(f"⚠️ DATA FREEZE DETECTED! Candle Age: {candle_age:.0f}s")
+                    send_telegram_html(f"⚠️ <b>DATA FREEZE</b>\nCandle stuck for {candle_age:.0f}s. Check API.")
+                    last_freeze_alert_ts = now
+                time.sleep(10)
+                continue # Skip logic, jangan trading pake data basi
 
             tick = data.get("tick", {})
             bid = float(tick.get("bid", 0) or 0)
             ask = float(tick.get("ask", 0) or 0)
             
-            # FIX: Auto-Detect Digits (Safe Math)
+            # Auto-Digits
             point = float(tick.get("point", 0.01) or 0.01)
-            if point <= 0: point = 0.01 # Fallback biar gak error log10
+            if point <= 0: point = 0.01 
             
             raw_digits = tick.get("digits")
             if raw_digits is not None:
                 digits = int(raw_digits)
             else:
-                try:
-                    digits = max(0, int(round(-math.log10(point))))
-                except:
-                    digits = 2 # Fallback terakhir
+                try: digits = max(0, int(round(-math.log10(point))))
+                except: digits = 2
 
             # --- 1. STATUS CHECK ---
             status = check_signal_status(last_bar['High'], last_bar['Low'], bid, ask)
@@ -182,18 +209,16 @@ def main():
                 status = "NONE" 
                 print(f"✅ State Cleared: {finished}")
 
-            # --- 2. CANDLE GATE & LOGIC ---
+            # --- 2. CANDLE GATE ---
             if current_ts != last_candle_ts:
                 contract = calculate_rules(data)
                 
                 # Runtime Critical Guard (Lag/Drift)
-                # Indikator V17+ return reason spesifik untuk drift/lag parah
                 is_critical = "Critical Lag" in contract["reason"] or "Severe Clock Drift" in contract["reason"]
-                
                 if is_critical:
                     now = time.time()
-                    if now - last_lag_alert_ts > 300: # Alert max tiap 5 menit
-                        send_telegram_html(f"⚠️ <b>CONNECTION UNSTABLE</b>\nBot paused logic.\nReason: {contract['reason']}")
+                    if now - last_lag_alert_ts > 300: 
+                        send_telegram_html(f"⚠️ <b>CONNECTION UNSTABLE</b>\nBot paused.\nReason: {contract['reason']}")
                         last_lag_alert_ts = now
 
                 # Debug Print
@@ -226,7 +251,7 @@ def main():
                             last_ai_fingerprint = current_fingerprint 
                             print(f"🤖 AI Judging {signal}...")
                             
-                            # Plumbing Data V18/V19/V20
+                            # Plumbing V21
                             meta = contract.get("meta", {})
                             metrics = {
                                 **meta.get("indicators", {}),
@@ -277,10 +302,9 @@ def main():
             time.sleep(2)
         except KeyboardInterrupt: sys.exit()
         except Exception as e: 
-            # Critical Error Alert
             err_msg = f"❌ <b>BOT CRASHED</b>\nError: {str(e)}"
             print(err_msg)
             send_telegram_html(err_msg)
-            time.sleep(10) # Jeda biar gak spam kalau auto-restart
+            time.sleep(10)
 
 if __name__ == "__main__": main()
