@@ -11,11 +11,9 @@ MAX_SPREAD_USD    = 0.50
 RR_RATIO          = 1.2  
 MAX_TP_USD        = 8.0  
 
-# SESSION FILTER (UTC HOURS)
-# London Open ~07:00 UTC | NY Close ~21:00 UTC
-# Kita main aman: 07:00 UTC s/d 20:00 UTC (14:00 - 03:00 WIB)
+# SESSION FILTER (UTC HOURS) - LONDON & NY ONLY
 SESSION_START_UTC = 7
-SESSION_END_UTC   = 20
+SESSION_END_UTC   = 20 
 
 def find_quality_ob(df):
     if len(df) < 100: return None, None
@@ -52,12 +50,11 @@ def find_quality_ob(df):
 
 def get_market_structure(df, point=0.01, window=5):
     """
-    Ekstrak Struktur Pivot Kronologis dengan Sequence String.
+    Ekstrak Struktur Pivot Kronologis dengan Deduplikasi Pintar.
     """
     if len(df) < (window * 2 + 10): return [], "Insufficient Data"
     
     pivots = []
-    # Dynamic Epsilon (Anti-Spam)
     eps = point * 2.0 
     
     for i in range(window, len(df) - window):
@@ -67,7 +64,6 @@ def get_market_structure(df, point=0.01, window=5):
         win_high = df['High'].iloc[i-window:i+window+1].max()
         win_low  = df['Low'].iloc[i-window:i+window+1].min()
         
-        # IF-IF Logic (Support Outside Bar)
         if curr_high >= (win_high - eps):
             pivots.append({
                 "index": i, "type": "High", 
@@ -80,10 +76,38 @@ def get_market_structure(df, point=0.01, window=5):
                 "price": float(curr_low), "time": str(df.index[i])
             })
     
-    # Labeling Logic (Highs vs Highs, Lows vs Lows)
-    # Ini benar secara teknikal untuk menentukan HH/LH
-    highs = [p for p in pivots if p['type'] == 'High']
-    lows = [p for p in pivots if p['type'] == 'Low']
+    # FIX: DEDUPLIKASI (Anti-Spam Pivot)
+    # Jika ada pivot tipe sama berdekatan, ambil yang paling ekstrim
+    unique_pivots = []
+    if pivots:
+        # Urutkan dulu berdasarkan index
+        pivots.sort(key=lambda x: x['index'])
+        
+        for p in pivots:
+            if not unique_pivots:
+                unique_pivots.append(p)
+                continue
+            
+            last_p = unique_pivots[-1]
+            
+            # Jika tipe sama (High ketemu High)
+            if p['type'] == last_p['type']:
+                # Kalau jaraknya dekat (< 5 candle)
+                if (p['index'] - last_p['index']) < 5:
+                    # Update jika pivot baru lebih ekstrim
+                    if p['type'] == 'High' and p['price'] > last_p['price']:
+                        unique_pivots[-1] = p
+                    elif p['type'] == 'Low' and p['price'] < last_p['price']:
+                        unique_pivots[-1] = p
+                else:
+                    unique_pivots.append(p) # Jarak jauh, anggap pivot baru
+            else:
+                unique_pivots.append(p) # Tipe beda, masukin
+
+    # Labeling Logic
+    final_pivots = unique_pivots
+    highs = [p for p in final_pivots if p['type'] == 'High']
+    lows = [p for p in final_pivots if p['type'] == 'Low']
     
     for i in range(len(highs)):
         label = "H"
@@ -101,10 +125,9 @@ def get_market_structure(df, point=0.01, window=5):
             else: label = "EqL"
         lows[i]['label'] = label
 
-    # Merge & Sort Chronologically (Biar Sequence String Urut)
+    # Merge Sort lagi (safety)
     all_pivots = sorted(highs + lows, key=lambda x: x['index'])
     
-    # Generate Sequence String
     recent_pivots = all_pivots[-5:]
     seq_list = [f"{p['type'][0]}({p['label']})" for p in recent_pivots]
     sequence_str = "->".join(seq_list)
@@ -112,7 +135,6 @@ def get_market_structure(df, point=0.01, window=5):
     return recent_pivots, sequence_str
 
 def calculate_rules(data):
-    # 1. PREP DATA
     if 'm5' not in data or data['m5'].empty:
         return {"signal": "WAIT", "reason": "Data Empty", "setup": {}, "timestamp": None}
 
@@ -125,19 +147,19 @@ def calculate_rules(data):
     point = float(tick.get('point', 0.01) or 0.01)
     
     last = df_m5.iloc[-1]
-    timestamp = last.name
+    timestamp = last.name # Ini Timestamp Pandas (UTC Aware)
 
-    # --- GUARD BLOCK 1: INTEGRITY & SESSION ---
-    
+    # --- GUARD BLOCK ---
     if bid <= 0 or ask <= 0:
         return {"signal": "WAIT", "reason": "Invalid Tick", "setup": {}, "timestamp": timestamp}
 
-    # Session Filter (Time Zone UTC)
-    current_hour_utc = datetime.now(timezone.utc).hour
-    if not (SESSION_START_UTC <= current_hour_utc <= SESSION_END_UTC):
-        return {"signal": "WAIT", "reason": f"Outside Session ({current_hour_utc}h UTC)", "setup": {}, "timestamp": timestamp}
+    # FIX: Session Filter pakai JAM CANDLE (Bukan Jam Laptop)
+    # timestamp biasanya pandas Timestamp. Pastikan UTC.
+    candle_hour = timestamp.hour
+    if candle_hour < SESSION_START_UTC or candle_hour >= SESSION_END_UTC:
+         return {"signal": "WAIT", "reason": f"Outside Session ({candle_hour}h UTC)", "setup": {}, "timestamp": timestamp}
 
-    # Stale Feed Audit (Adaptive)
+    # Stale Feed & Lag
     tick_msc = int(meta.get("tick_time_msc") or 0)
     tick_sec = int(meta.get("tick_time") or 0)
     broker_ts = None
@@ -150,26 +172,23 @@ def calculate_rules(data):
     
     if broker_ts:
         lag_raw = time.time() - broker_ts
-        if lag_raw < -2: warnings.append(f"Clock Drift {lag_raw:.1f}s")
-        
         lag_clamped = max(0.0, lag_raw)
         
-        # IMPLICIT NEWS DETECTOR: Spread agak lebar + Lag mulai naik = News Spike?
+        if lag_raw < -2: warnings.append(f"Clock Drift {lag_raw:.1f}s")
+        
+        # Implicit News / Volatility Check
         real_spread_usd = abs(ask - bid)
         if real_spread_usd > 0.35 and lag_clamped > 2.0:
-            return {"signal": "WAIT", "reason": "High Volatility (News?)", "setup": {}, "timestamp": timestamp}
+            return {"signal": "WAIT", "reason": "High Volatility (Spread+Lag)", "setup": {}, "timestamp": timestamp}
 
-        # Adaptive Stale Feed
         if lag_clamped > 8: 
              return {"signal": "WAIT", "reason": f"Critical Lag: {lag_clamped:.1f}s", "setup": {}, "timestamp": timestamp}
         elif lag_clamped > 3:
-             warnings.append(f"Mod. Lag {lag_clamped:.1f}s") # Info ke AI/Logger
+             warnings.append(f"Mod. Lag {lag_clamped:.1f}s")
     else:
         return {"signal": "WAIT", "reason": "No Broker TS", "setup": {}, "timestamp": timestamp}
 
-    # --- GUARD BLOCK 2: PRICE & BROKER ---
-    
-    # Hard Cap Spread (Garbage Data / Major News)
+    # Spread Hard Cap
     real_spread_usd = abs(ask - bid)
     if real_spread_usd > MAX_SPREAD_USD:
         return {"signal": "WAIT", "reason": f"High Spread: ${real_spread_usd:.2f}", "setup": {}, "timestamp": timestamp}
@@ -194,7 +213,7 @@ def calculate_rules(data):
             
         trend = "BULLISH" if ema_50 > ema_200 else "BEARISH"
         
-        # Extract Structure
+        # FIX: Pivot Dedupe Logic
         m15_pivots, m15_sequence = get_market_structure(df_m15, point=point)
     else:
         return {"signal": "WAIT", "reason": "M15 Missing", "setup": {}, "timestamp": timestamp}
@@ -252,15 +271,13 @@ def calculate_rules(data):
             structural_sl = ob_high_point + sweep_buffer
             raw_sl_dist = structural_sl - entry_price
         
-        if raw_sl_dist <= 0: return {"signal": "WAIT", "reason": "Invalid SL Distance", "setup": {}, "timestamp": timestamp}
+        if raw_sl_dist <= 0: return {"signal": "WAIT", "reason": "Invalid SL Dist", "setup": {}, "timestamp": timestamp}
         if raw_sl_dist > TARGET_SL_MAX_USD: return {"signal": "WAIT", "reason": f"Structure Too Wide (${raw_sl_dist:.2f})", "setup": {}, "timestamp": timestamp}
 
         final_sl_dist = max(TARGET_SL_MIN_USD, raw_sl_dist)
         sl_usd_dist = final_sl_dist
         
-        # Spread Ratio (Quality Check) - Cek setelah hard cap
-        if real_spread_usd > (final_sl_dist * 0.15):
-             return {"signal": "WAIT", "reason": "Spread too expensive", "setup": {}, "timestamp": timestamp}
+        if real_spread_usd > (final_sl_dist * 0.15): return {"signal": "WAIT", "reason": "Spread too expensive", "setup": {}, "timestamp": timestamp}
         
         raw_tp_dist = final_sl_dist * RR_RATIO
         final_tp_dist = min(raw_tp_dist, MAX_TP_USD)
