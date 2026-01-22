@@ -6,7 +6,8 @@ import os
 import sys
 import requests
 import html
-from datetime import datetime
+import json
+from datetime import datetime, timezone
 
 # Import Module Internal
 from src.data_loader import get_market_data
@@ -27,8 +28,65 @@ def send_telegram_html(message):
         )
     except: pass
 
+def run_diagnostics():
+    """
+    PRE-FLIGHT CHECK: Pastikan Server, Waktu, dan Data sehat sebelum trading.
+    """
+    print("\n🕵️ RUNNING PRE-FLIGHT DIAGNOSTICS...")
+    
+    # 1. Cek Koneksi Data
+    print("[1/4] Checking Market Data Feed...", end=" ")
+    data = get_market_data()
+    if not data or 'm5' not in data or data['m5'].empty:
+        print("❌ FAILED! (No Data)")
+        return False
+    print(f"✅ OK ({len(data['m5'])} candles)")
+
+    # 2. Cek Time Sync (Vital buat Scalping)
+    print("[2/4] Checking Server Time Sync...", end=" ")
+    meta = data.get('meta', {})
+    tick_msc = int(meta.get("tick_time_msc") or 0)
+    
+    if tick_msc == 0:
+        print("❌ FAILED! (No Tick Timestamp)")
+        return False
+        
+    server_ts = tick_msc / 1000.0
+    local_ts = time.time()
+    lag = local_ts - server_ts
+    
+    print(f"✅ OK (Lag: {lag:.3f}s)")
+    if abs(lag) > 2.0:
+        print(f"⚠️ WARNING: High Lag detected ({lag:.3f}s). Check VPS Clock!")
+
+    # 3. Cek USD Unit Consistency (Harga Emas)
+    print("[3/4] Checking Price Unit...", end=" ")
+    last_close = data['m5']['Close'].iloc[-1]
+    if last_close < 100 or last_close > 5000:
+        print(f"⚠️ WARNING: Price {last_close} seems weird for XAUUSD. Check Symbol!")
+    else:
+        print(f"✅ OK (Price: {last_close})")
+
+    # 4. AI Config Check
+    print("[4/4] Checking AI Configuration...", end=" ")
+    key = os.getenv("GEMINI_API_KEY")
+    if not key:
+        print("❌ FAILED! (No API Key)")
+        return False
+    print("✅ OK")
+
+    print("\n🚀 SYSTEMS GO. STARTING ENGINE...\n")
+    time.sleep(2)
+    return True
+
 def main():
-    print("="*40 + "\n💀 GOLD KILLER PRO: PLATINUM EDITION (V9) 💀\n" + "="*40)
+    print("="*40 + "\n💀 GOLD KILLER PRO: PLATINUM (V18 SEALED) 💀\n" + "="*40)
+    
+    # JALANKAN DIAGNOSTIK DULU
+    if not run_diagnostics():
+        print("⛔ STARTUP ABORTED DUE TO SYSTEM FAILURE.")
+        return
+
     logger = TradeLogger()
     
     last_candle_ts = None
@@ -70,6 +128,12 @@ def main():
             if current_ts != last_candle_ts:
                 contract = calculate_rules(data)
                 
+                # --- DEBUG PRINT (Buat Audit Log Realtime) ---
+                # Print status tiap candle baru biar lu tau bot hidup
+                obs_status = "Wait"
+                if contract["signal"] != "WAIT": obs_status = f"SIGNAL {contract['signal']}"
+                print(f"[{datetime.now().strftime('%H:%M:%S')}] Candle Close: {last_bar['Close']} | {obs_status} | Reason: {contract['reason']}")
+
                 if current_ts != last_logged_ts:
                     logger.log_contract(contract)
                     last_logged_ts = current_ts
@@ -82,7 +146,7 @@ def main():
                     if not setup or "entry" not in setup:
                         print("⚠️ Setup incomplete, skipping...")
                     else:
-                        # FIX: Safe Fingerprint (String Fallback jika gagal float)
+                        # FIX: Safe Fingerprint
                         try:
                             e_r = round(float(setup.get('entry', 0) or 0), digits)
                             sl_r = round(float(setup.get('sl', 0) or 0), digits)
@@ -99,31 +163,27 @@ def main():
                             
                             print(f"🤖 AI Judging {signal}...")
                             
-                            # --- FIX PLUMBING DATA KE AI ---
-                            # Mengambil semua data meta dari indicators.py untuk dikirim ke AI
+                            # --- FIX PLUMBING (V18 VERIFIED) ---
                             meta = contract.get("meta", {})
                             
                             metrics = {
-                                # 1. Indikator Utama (Trend, OB, Structure, Pivots)
                                 **meta.get("indicators", {}),
-                                
-                                # 2. Data Plumbing (Warning & Audit VPS)
                                 "warnings": meta.get("warnings", []),
                                 "tick_lag_sec": meta.get("tick_lag_sec", 0),
                                 "tick_lag_sec_raw": meta.get("tick_lag_sec_raw", 0),
-                                
-                                # 3. Risk & Harga
                                 "spread": meta.get("spread", 0),
                                 "risk_audit": meta.get("risk_audit", {}),
                                 "price": meta.get("candle", {}).get("close", 0)
                             }
                             
+                            # DEBUG: DUMP METRICS UNTUK AUDIT (Opsional, print di console)
+                            # print(json.dumps(metrics, indent=2, default=str))
+
                             judge = ask_ai_judge(signal, contract["reason"], metrics)
                             decision = str(judge.get("decision", "REJECT")).strip().upper()
                             
                             if decision == "APPROVE":
                                 icon = "🟢" if signal == "BUY" else "🔴"
-                                
                                 ai_reason = html.escape(str(judge.get("reason", "No Reason")))
                                 e_entry = html.escape(str(setup['entry']))
                                 e_sl = html.escape(str(setup['sl']))
@@ -149,8 +209,7 @@ def main():
                                     status = "STILL_OPEN"
                                     print(f"✅ {signal} SENT & LOCKED")
                                 else:
-                                    print("🚨 WRITE FAIL! Signal ignored.")
-                                    send_telegram_html("⚠️ <b>SYSTEM ERROR:</b> Disk Write Failed!")
+                                    print("🚨 WRITE FAIL!")
                             else:
                                 print(f"❌ AI REJECTED: {judge.get('reason')}")
                 
