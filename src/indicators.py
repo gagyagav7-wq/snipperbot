@@ -45,17 +45,18 @@ def find_quality_ob(df):
 
 def get_market_structure(df, point=0.01, atr_val=1.0, window=5):
     """
-    Ekstrak Struktur Pivot V15 (Directional Wave):
-    - FIX: Signed Leg Sizes (+/-) biar AI tau arah.
-    - FIX: Recompute Leg Size saat Outside Bar Compression.
+    Ekstrak Struktur Pivot V16 (The Truth):
+    - FIX 1: Signed Leg dari Delta Price Asli (No Assumption).
+    - FIX 2: ATR Guard (Anti NaN Crash).
+    - FIX 3: Outside Bar Flag.
     """
     if len(df) > 200: df = df.tail(200)
-    # FIX: Guard Weak Structure
     if len(df) < (window * 2 + 10): return [], "Insufficient Data", None, []
     
     raw_pivots = []
     eps = point * 1.0 
     
+    # Raw Extraction
     for i in range(window, len(df) - window):
         curr_high = df['High'].iloc[i]
         curr_low = df['Low'].iloc[i]
@@ -70,23 +71,29 @@ def get_market_structure(df, point=0.01, atr_val=1.0, window=5):
     type_order = {"Low": 0, "High": 1}
     raw_pivots.sort(key=lambda x: (x["pos"], type_order[x["type"]]))
     
+    # FIX: ATR Guard (Fallback ke $1.0 kalau ATR NaN/0)
+    if pd.isna(atr_val) or atr_val <= 0: atr_val = 1.0
     min_dev = max(1.0, atr_val * 0.3) 
+    
     clean_pivots = []
     
     for p in raw_pivots:
+        p['is_outside'] = False # Default Flag
+        
         if not clean_pivots:
+            p['leg_signed'] = 0.0 # Pivot pertama gak punya leg sebelumnya
             clean_pivots.append(p)
             continue
         
         last_p = clean_pivots[-1]
         
-        # 1. OUTSIDE BAR COMPRESSION (Posisi Sama)
+        # 1. OUTSIDE BAR COMPRESSION
         if p['pos'] == last_p['pos']:
             if len(clean_pivots) >= 2:
                 prev_prev = clean_pivots[-2]
                 updated = False
                 
-                # Paksa Alternating berdasarkan pivot ke-2 terakhir
+                # Paksa Alternating
                 if prev_prev['type'] == 'High' and p['type'] == 'Low':
                     clean_pivots[-1] = p
                     updated = True
@@ -94,12 +101,12 @@ def get_market_structure(df, point=0.01, atr_val=1.0, window=5):
                     clean_pivots[-1] = p
                     updated = True
                 
-                # FIX: Recompute Leg jika update
                 if updated:
-                    dist = abs(p['price'] - prev_prev['price'])
-                    sign = 1 if p['type'] == 'High' else -1
-                    p['leg_size'] = round(dist, 2)
-                    p['leg_signed'] = round(sign * dist, 2)
+                    # FIX: Hitung Delta Price Murni
+                    diff = p['price'] - prev_prev['price']
+                    p['leg_signed'] = round(diff, 2)
+                    p['leg_size'] = round(abs(diff), 2)
+                    p['is_outside'] = True # Flagging
                     clean_pivots[-1] = p
             continue
 
@@ -110,19 +117,21 @@ def get_market_structure(df, point=0.01, atr_val=1.0, window=5):
             elif p['type'] == 'Low' and p['price'] < last_p['price']: updated = True
             
             if updated:
+                # Update Pivot (Recompute Leg dari pivot SEBELUMNYA yg valid)
                 if len(clean_pivots) >= 2:
                     prev_pivot = clean_pivots[-2]
-                    dist = abs(p['price'] - prev_pivot['price'])
-                    sign = 1 if p['type'] == 'High' else -1
-                    p['leg_size'] = round(dist, 2)
-                    p['leg_signed'] = round(sign * dist, 2)
+                    diff = p['price'] - prev_pivot['price']
+                    p['leg_signed'] = round(diff, 2)
+                    p['leg_size'] = round(abs(diff), 2)
                 clean_pivots[-1] = p
         else:
+            # Tipe BEDA: Cek Jarak Deviation
             dist = abs(p['price'] - last_p['price'])
             if dist >= min_dev:
-                sign = 1 if p['type'] == 'High' else -1
-                p['leg_size'] = round(dist, 2)
-                p['leg_signed'] = round(sign * dist, 2) # FIX: Signed Leg
+                # FIX: Hitung Delta Price Murni (Real Truth)
+                diff = p['price'] - last_p['price']
+                p['leg_signed'] = round(diff, 2)
+                p['leg_size'] = round(abs(diff), 2)
                 clean_pivots.append(p)
 
     # Labeling
@@ -147,7 +156,6 @@ def get_market_structure(df, point=0.01, atr_val=1.0, window=5):
 
     all_pivots = sorted(highs + lows, key=lambda x: x['pos'])
     
-    # FIX: Guard kalau pivot kedikitan (Weak Structure)
     if len(all_pivots) < 3:
         return all_pivots, "Weak Structure", None, []
 
@@ -155,7 +163,6 @@ def get_market_structure(df, point=0.01, atr_val=1.0, window=5):
     seq_list = [f"{p['type'][0]}({p['label']})" for p in recent_pivots]
     sequence_str = "->".join(seq_list)
     
-    # FIX: Export Signed Legs
     last_3_legs = [p.get('leg_signed', 0) for p in recent_pivots if 'leg_signed' in p][-3:]
     last_pivot_data = recent_pivots[-1] if recent_pivots else None
     
@@ -174,6 +181,7 @@ def calculate_rules(data):
     point = float(tick.get('point', 0.01) or 0.01)
     last = df_m5.iloc[-1]
     
+    # Timezone Safety
     timestamp = last.name
     if getattr(timestamp, "tzinfo", None) is None: timestamp = timestamp.tz_localize("UTC")
     else: timestamp = timestamp.tz_convert("UTC")
@@ -216,7 +224,7 @@ def calculate_rules(data):
     m15_sequence = "None"
     dist_to_pivot = 0.0
     last_pivot_info = "None"
-    leg_sizes_signed = [] # New var
+    leg_sizes_signed = []
     
     if 'm15' in data and not data['m15'].empty:
         df_m15 = data['m15']
@@ -228,17 +236,18 @@ def calculate_rules(data):
         
         atr_m15 = ta.atr(df_m15['High'], df_m15['Low'], df_m15['Close'], length=14).iloc[-1]
         
-        # Panggil V15 Structure Logic
+        # Panggil V16 Structure Logic
         m15_pivots, m15_sequence, last_pivot_data, leg_sizes_signed = get_market_structure(df_m15, point=point, atr_val=atr_m15)
         
-        # FIX: Guard Weak Structure
         if m15_sequence == "Weak Structure":
              return {"signal": "WAIT", "reason": "Weak M15 Structure (Chop)", "setup": {}, "timestamp": timestamp}
         
         mid_price = (bid + ask) / 2.0
         if last_pivot_data:
             dist_to_pivot = abs(mid_price - last_pivot_data['price'])
-            last_pivot_info = f"{last_pivot_data['type']}@{last_pivot_data['price']:.2f}"
+            # Export Info Outside Bar ke AI
+            obs_tag = "[OBS]" if last_pivot_data.get('is_outside') else ""
+            last_pivot_info = f"{last_pivot_data['type']}@{last_pivot_data['price']:.2f} {obs_tag}"
     else:
         return {"signal": "WAIT", "reason": "M15 Missing", "setup": {}, "timestamp": timestamp}
 
@@ -319,7 +328,7 @@ def calculate_rules(data):
                 "pivots": m15_pivots,
                 "last_pivot": last_pivot_info,
                 "dist_to_pivot": dist_to_pivot,
-                "leg_sizes_signed": leg_sizes_signed # Export ke AI
+                "leg_sizes_signed": leg_sizes_signed
             }
         },
         "risk_audit": {
