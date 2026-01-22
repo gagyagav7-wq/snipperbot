@@ -4,7 +4,7 @@ import numpy as np
 import time
 from datetime import datetime, time as dt_time, timezone
 
-# --- KONFIGURASI SCALPER ---
+# --- KONFIGURASI SCALPER (USD ABSOLUTE) ---
 TARGET_SL_MIN_USD = 3.0  
 TARGET_SL_MAX_USD = 5.0  
 MAX_SPREAD_USD    = 0.50 
@@ -26,6 +26,8 @@ def find_quality_ob(df):
     for i in range(len(subset)-4, 0, -1):
         atr_next = subset['ATR'].iloc[i+1]
         if pd.isna(atr_next) or atr_next <= 0: continue
+        
+        # BULLISH
         if subset['Close'].iloc[i] < subset['Open'].iloc[i]: 
             body_next = abs(subset['Close'].iloc[i+1] - subset['Open'].iloc[i+1])
             if subset['Close'].iloc[i+1] > subset['Open'].iloc[i+1] and body_next > (atr_next * 0.8):
@@ -35,6 +37,8 @@ def find_quality_ob(df):
     for i in range(len(subset)-4, 0, -1):
         atr_next = subset['ATR'].iloc[i+1]
         if pd.isna(atr_next) or atr_next <= 0: continue
+
+        # BEARISH
         if subset['Close'].iloc[i] > subset['Open'].iloc[i]:
             body_next = abs(subset['Close'].iloc[i+1] - subset['Open'].iloc[i+1])
             if subset['Close'].iloc[i+1] < subset['Open'].iloc[i+1] and body_next > (atr_next * 0.8):
@@ -44,39 +48,77 @@ def find_quality_ob(df):
     return ob_bull, ob_bear
 
 def get_market_structure(df, point=0.01, window=5):
-    # FIX: Batasi data biar ringan (Performance Optimization)
-    if len(df) > 200: df = df.tail(200).reset_index(drop=True)
+    """
+    Ekstrak Struktur Pivot M15:
+    - FIX 1: Tidak reset_index (Biar Timestamp aman)
+    - FIX 2: Simpan 'pos' manual untuk Deduplikasi Integer
+    - FIX 3: Epsilon diperketat (1.0 * Point)
+    """
+    # Ambil slice 200 data terakhir TANPA reset index
+    # Ini menjaga df.index tetap berupa Timestamp asli
+    if len(df) > 200: df = df.tail(200)
     if len(df) < (window * 2 + 10): return [], "Insufficient Data"
     
     pivots = []
-    eps = point * 2.0 
+    # Epsilon diperketat (1 tick) biar gak spam pivot
+    eps = point * 1.0 
     
+    # Loop menggunakan integer range relatif terhadap slice df
     for i in range(window, len(df) - window):
         curr_high = df['High'].iloc[i]
         curr_low = df['Low'].iloc[i]
+        
+        # Cek window pakai iloc (posisi integer)
         win_high = df['High'].iloc[i-window:i+window+1].max()
         win_low  = df['Low'].iloc[i-window:i+window+1].min()
         
+        # IF-IF Logic (Support Outside Bar)
         if curr_high >= (win_high - eps):
-            pivots.append({"index": i, "type": "High", "price": float(curr_high), "time": str(df.index[i])})
+            pivots.append({
+                "pos": i, # Posisi Integer (0-200) untuk hitung jarak
+                "type": "High", 
+                "price": float(curr_high), 
+                "time": str(df.index[i]) # Timestamp asli untuk AI
+            })
+            
         if curr_low <= (win_low + eps):
-            pivots.append({"index": i, "type": "Low", "price": float(curr_low), "time": str(df.index[i])})
+            pivots.append({
+                "pos": i,
+                "type": "Low", 
+                "price": float(curr_low), 
+                "time": str(df.index[i])
+            })
     
+    # FIX: DEDUPLIKASI (Pakai 'pos' bukan 'index' yg timestamp)
     unique_pivots = []
     if pivots:
-        pivots.sort(key=lambda x: x['index'])
+        # Urutkan berdasarkan posisi kemunculan
+        pivots.sort(key=lambda x: x['pos'])
+        
         for p in pivots:
             if not unique_pivots:
                 unique_pivots.append(p)
                 continue
+            
             last_p = unique_pivots[-1]
+            
+            # Jika tipe sama (High ketemu High)
             if p['type'] == last_p['type']:
-                if (p['index'] - last_p['index']) < 5:
-                    if p['type'] == 'High' and p['price'] > last_p['price']: unique_pivots[-1] = p
-                    elif p['type'] == 'Low' and p['price'] < last_p['price']: unique_pivots[-1] = p
-                else: unique_pivots.append(p)
-            else: unique_pivots.append(p)
+                # Hitung jarak candle pakai 'pos' (Integer subtraction)
+                distance = p['pos'] - last_p['pos']
+                
+                # Kalau dekat (< 5 candle), merge ambil yang ekstrim
+                if distance < 5:
+                    if p['type'] == 'High' and p['price'] > last_p['price']:
+                        unique_pivots[-1] = p
+                    elif p['type'] == 'Low' and p['price'] < last_p['price']:
+                        unique_pivots[-1] = p
+                else:
+                    unique_pivots.append(p) # Jarak jauh, pivot baru
+            else:
+                unique_pivots.append(p) # Tipe beda, simpan
 
+    # Labeling Logic
     final_pivots = unique_pivots
     highs = [p for p in final_pivots if p['type'] == 'High']
     lows = [p for p in final_pivots if p['type'] == 'Low']
@@ -97,7 +139,9 @@ def get_market_structure(df, point=0.01, window=5):
             else: label = "EqL"
         lows[i]['label'] = label
 
-    all_pivots = sorted(highs + lows, key=lambda x: x['index'])
+    # Final Sort Chronologically
+    all_pivots = sorted(highs + lows, key=lambda x: x['pos'])
+    
     recent_pivots = all_pivots[-5:]
     seq_list = [f"{p['type'][0]}({p['label']})" for p in recent_pivots]
     sequence_str = "->".join(seq_list)
@@ -118,7 +162,7 @@ def calculate_rules(data):
     
     last = df_m5.iloc[-1]
     
-    # FIX: Timezone Safety (UTC Aware)
+    # FIX: Timezone Normalization (Safe UTC)
     timestamp = last.name
     if getattr(timestamp, "tzinfo", None) is None:
         timestamp = timestamp.tz_localize("UTC")
@@ -129,12 +173,12 @@ def calculate_rules(data):
     if bid <= 0 or ask <= 0:
         return {"signal": "WAIT", "reason": "Invalid Tick", "setup": {}, "timestamp": timestamp}
 
-    # Session Filter (Sekarang Aman UTC)
+    # Session Filter (UTC Based)
     candle_hour = timestamp.hour
     if candle_hour < SESSION_START_UTC or candle_hour >= SESSION_END_UTC:
          return {"signal": "WAIT", "reason": f"Outside Session ({candle_hour}h UTC)", "setup": {}, "timestamp": timestamp}
 
-    # Feed Audit
+    # Feed Audit & News Detector
     tick_msc = int(meta.get("tick_time_msc") or 0)
     tick_sec = int(meta.get("tick_time") or 0)
     broker_ts = None
@@ -150,9 +194,12 @@ def calculate_rules(data):
         lag_clamped = max(0.0, lag_raw)
         
         if lag_raw < -2: warnings.append(f"Clock Drift {lag_raw:.1f}s")
+        
         real_spread_usd = abs(ask - bid)
+        # Implicit News
         if real_spread_usd > 0.35 and lag_clamped > 2.0:
             return {"signal": "WAIT", "reason": "High Volatility (Spread+Lag)", "setup": {}, "timestamp": timestamp}
+
         if lag_clamped > 8: 
              return {"signal": "WAIT", "reason": f"Critical Lag: {lag_clamped:.1f}s", "setup": {}, "timestamp": timestamp}
         elif lag_clamped > 3:
@@ -180,6 +227,8 @@ def calculate_rules(data):
         ema_200 = ta.ema(df_m15['Close'], length=200).iloc[-1]
         if pd.isna(ema_50): return {"signal": "WAIT", "reason": "EMA NaN", "setup": {}, "timestamp": timestamp}
         trend = "BULLISH" if ema_50 > ema_200 else "BEARISH"
+        
+        # Panggil Structure Extractor yang sudah diperbaiki
         m15_pivots, m15_sequence = get_market_structure(df_m15, point=point)
     else:
         return {"signal": "WAIT", "reason": "M15 Missing", "setup": {}, "timestamp": timestamp}
@@ -196,20 +245,27 @@ def calculate_rules(data):
     
     if trend == "BULLISH" and ob_bull:
         ob_low, ob_high = ob_bull
-        if last['Low'] <= ob_high and last['Low'] >= (ob_low - sweep_buffer) and last['Close'] > ob_high:
-            if last['Close'] <= (ob_high + atr_val * 0.2):
-                signal = "BUY"
-                reason = "SMC: Bullish OB Retest + M15 Trend"
-                ob_used = ob_bull
+        touched = last['Low'] <= ob_high
+        held = last['Low'] >= (ob_low - sweep_buffer)
+        rejected = last['Close'] > ob_high
+        near_ob = last['Close'] <= (ob_high + atr_val * 0.2) 
+        if touched and held and rejected and near_ob:
+            signal = "BUY"
+            reason = "SMC: Bullish OB Retest + M15 Trend"
+            ob_used = ob_bull
 
     elif trend == "BEARISH" and ob_bear:
         ob_low, ob_high = ob_bear
-        if last['High'] >= ob_low and last['High'] <= (ob_high + sweep_buffer) and last['Close'] < ob_low:
-            if last['Close'] >= (ob_low - atr_val * 0.2):
-                signal = "SELL"
-                reason = "SMC: Bearish OB Retest + M15 Trend"
-                ob_used = ob_bear
+        touched = last['High'] >= ob_low
+        held = last['High'] <= (ob_high + sweep_buffer)
+        rejected = last['Close'] < ob_low
+        near_ob = last['Close'] >= (ob_low - atr_val * 0.2)
+        if touched and held and rejected and near_ob:
+            signal = "SELL"
+            reason = "SMC: Bearish OB Retest + M15 Trend"
+            ob_used = ob_bear
 
+    # --- EXECUTION ---
     setup = {}
     sl_usd_dist = 0.0
     tp_usd_dist = 0.0
@@ -247,6 +303,7 @@ def calculate_rules(data):
 
         setup = {"entry": entry_price, "sl": sl_price, "tp": tp_price}
 
+    # Meta Export Lengkap
     export_meta = {
         "indicators": {
             "trend_m15": trend,
