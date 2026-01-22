@@ -25,12 +25,13 @@ def ask_ai_judge(signal_type, bot_reason, metrics):
     sequence = m15_struct.get('sequence', 'N/A')
     last_pivot = m15_struct.get('last_pivot', 'N/A')
     dist_to_pivot = m15_struct.get('dist_to_pivot', 0.0)
-    leg_sizes = m15_struct.get('leg_sizes', []) # Ambil Data Leg Sizes
+    # FIX: Ambil Signed Legs
+    leg_sizes = m15_struct.get('leg_sizes_signed', []) 
 
     warnings = metrics.get('warnings', [])
     warn_str = ", ".join(warnings) if warnings else "None"
 
-    # PROMPT V14: Leg Size Integrated
+    # PROMPT V15: Directional Leg Analysis
     prompt = f"""
     Role: Senior XAUUSD Scalper (SMC & ZigZag Wave Analyst).
     
@@ -39,7 +40,7 @@ def ask_ai_judge(signal_type, bot_reason, metrics):
     M15 Trend: {trend}
     
     M15 Structure (ZigZag): {sequence}
-    Recent Leg Sizes: {leg_sizes} (Volatility Proxy)
+    Recent Leg Sizes (+Up/-Down): {leg_sizes} 
     Last Pivot: {last_pivot}
     Distance to Pivot: ${dist_to_pivot:.2f}
     
@@ -49,21 +50,22 @@ def ask_ai_judge(signal_type, bot_reason, metrics):
     
     RULES:
     1. TREND ALIGNMENT:
-       - BUY: Structure should imply Higher Lows (HL) or Higher Highs (HH).
-       - SELL: Structure should imply Lower Highs (LH) or Lower Lows (LL).
+       - BUY: Structure should imply Higher Lows (HL).
+       - SELL: Structure should imply Lower Highs (LH).
        
-    2. WAVE & MOMENTUM (Leg Analysis):
-       - Strong Impulse = Large leg sizes in trend direction.
-       - Corrective pullback = Small leg sizes.
-       - Avoid trading if legs are tiny (Choppy/No Volatility).
+    2. WAVE MOMENTUM (Directional Legs):
+       - Look at 'Recent Leg Sizes'. 
+       - If BUYING: You want Positive (+) legs to be large (Impulse), and Negative (-) legs to be small (Correction).
+       - If SELLING: You want Negative (-) legs to be large (Impulse).
+       - REJECT if momentum is opposite to signal.
        
     3. DON'T CHASE:
-       - If BUYING and Distance to Pivot (HH) is tiny -> Risk of buying top.
-       - If SELLING and Distance to Pivot (LL) is tiny -> Risk of selling bottom.
+       - Avoid buying right at the top of a large (+) leg.
+       - Avoid selling right at the bottom of a large (-) leg.
     
     DECISION:
-    - APPROVE: Structure aligns, momentum exists (healthy legs), entry not chasing.
-    - REJECT: Fighting structure or Low Volatility Chop.
+    - APPROVE: Structure aligns, momentum supports signal.
+    - REJECT: Fighting structure or Wrong Momentum.
     
     Output JSON ONLY:
     {{
