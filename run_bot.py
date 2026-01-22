@@ -27,7 +27,7 @@ def send_telegram_html(message):
     except: pass
 
 def main():
-    print("="*40 + "\n💀 GOLD KILLER PRO: FINAL NO-DRAMA 💀\n" + "="*40)
+    print("="*40 + "\n💀 GOLD KILLER PRO: FINAL NO-TOUCH 💀\n" + "="*40)
     logger = TradeLogger()
     
     last_candle_ts = None
@@ -50,7 +50,6 @@ def main():
             tick = data.get("tick", {})
             bid = tick.get("bid", 0.0)
             ask = tick.get("ask", 0.0)
-            # FIX: Ambil digit broker (default 2 kalau gak ketemu)
             digits = int(tick.get("digits", 2)) 
 
             # --- 1. STATUS CHECK ---
@@ -80,11 +79,18 @@ def main():
                     if not setup or "entry" not in setup:
                         print("⚠️ Setup incomplete, skipping...")
                     else:
-                        # FIX: Fingerprint dinamis sesuai digit broker
-                        e_r = round(setup.get('entry', 0), digits)
-                        sl_r = round(setup.get('sl', 0), digits)
-                        tp_r = round(setup.get('tp', 0), digits)
-                        
+                        # FIX: Safe Type Casting sebelum Rounding
+                        try:
+                            e_val = float(setup.get('entry', 0) or 0)
+                            sl_val = float(setup.get('sl', 0) or 0)
+                            tp_val = float(setup.get('tp', 0) or 0)
+                            
+                            e_r = round(e_val, digits)
+                            sl_r = round(sl_val, digits)
+                            tp_r = round(tp_val, digits)
+                        except:
+                            e_r, sl_r, tp_r = 0, 0, 0
+
                         current_fingerprint = f"{current_ts}_{signal}_{e_r}_{sl_r}_{tp_r}"
                         
                         if current_fingerprint != last_ai_fingerprint:
@@ -101,7 +107,6 @@ def main():
                             decision = str(judge.get("decision", "REJECT")).strip().upper()
                             
                             if decision == "APPROVE":
-                                # FIX: Icon explicit biar aman
                                 icon = "🟢" if signal == "BUY" else "🔴"
                                 
                                 ai_reason = html.escape(str(judge.get("reason", "No Reason")))
