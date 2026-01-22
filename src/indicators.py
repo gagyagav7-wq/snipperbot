@@ -26,8 +26,6 @@ def find_quality_ob(df):
     for i in range(len(subset)-4, 0, -1):
         atr_next = subset['ATR'].iloc[i+1]
         if pd.isna(atr_next) or atr_next <= 0: continue
-        
-        # BULLISH
         if subset['Close'].iloc[i] < subset['Open'].iloc[i]: 
             body_next = abs(subset['Close'].iloc[i+1] - subset['Open'].iloc[i+1])
             if subset['Close'].iloc[i+1] > subset['Open'].iloc[i+1] and body_next > (atr_next * 0.8):
@@ -37,8 +35,6 @@ def find_quality_ob(df):
     for i in range(len(subset)-4, 0, -1):
         atr_next = subset['ATR'].iloc[i+1]
         if pd.isna(atr_next) or atr_next <= 0: continue
-
-        # BEARISH
         if subset['Close'].iloc[i] > subset['Open'].iloc[i]:
             body_next = abs(subset['Close'].iloc[i+1] - subset['Open'].iloc[i+1])
             if subset['Close'].iloc[i+1] < subset['Open'].iloc[i+1] and body_next > (atr_next * 0.8):
@@ -49,79 +45,57 @@ def find_quality_ob(df):
 
 def get_market_structure(df, point=0.01, window=5):
     """
-    Ekstrak Struktur Pivot M15:
-    - FIX 1: Tidak reset_index (Biar Timestamp aman)
-    - FIX 2: Simpan 'pos' manual untuk Deduplikasi Integer
-    - FIX 3: Epsilon diperketat (1.0 * Point)
+    Ekstrak Struktur Pivot M15 dengan Strict Alternating Logic (High-Low-High-Low).
+    Menjamin sequence bersih untuk SMC/Elliott Wave.
     """
-    # Ambil slice 200 data terakhir TANPA reset index
-    # Ini menjaga df.index tetap berupa Timestamp asli
     if len(df) > 200: df = df.tail(200)
-    if len(df) < (window * 2 + 10): return [], "Insufficient Data"
+    if len(df) < (window * 2 + 10): return [], "Insufficient Data", None
     
-    pivots = []
-    # Epsilon diperketat (1 tick) biar gak spam pivot
+    raw_pivots = []
+    # Epsilon cukup 1 tick (float tolerance)
     eps = point * 1.0 
     
-    # Loop menggunakan integer range relatif terhadap slice df
+    # 1. Raw Extraction (Bisa ada H->H atau L->L)
     for i in range(window, len(df) - window):
         curr_high = df['High'].iloc[i]
         curr_low = df['Low'].iloc[i]
         
-        # Cek window pakai iloc (posisi integer)
         win_high = df['High'].iloc[i-window:i+window+1].max()
         win_low  = df['Low'].iloc[i-window:i+window+1].min()
         
-        # IF-IF Logic (Support Outside Bar)
+        # Simpan pos (integer) dan time (string)
         if curr_high >= (win_high - eps):
-            pivots.append({
-                "pos": i, # Posisi Integer (0-200) untuk hitung jarak
-                "type": "High", 
-                "price": float(curr_high), 
-                "time": str(df.index[i]) # Timestamp asli untuk AI
-            })
-            
+            raw_pivots.append({"pos": i, "type": "High", "price": float(curr_high), "time": str(df.index[i])})
         if curr_low <= (win_low + eps):
-            pivots.append({
-                "pos": i,
-                "type": "Low", 
-                "price": float(curr_low), 
-                "time": str(df.index[i])
-            })
+            raw_pivots.append({"pos": i, "type": "Low", "price": float(curr_low), "time": str(df.index[i])})
     
-    # FIX: DEDUPLIKASI (Pakai 'pos' bukan 'index' yg timestamp)
-    unique_pivots = []
-    if pivots:
-        # Urutkan berdasarkan posisi kemunculan
-        pivots.sort(key=lambda x: x['pos'])
+    # 2. Strict Alternating Logic (The Clean-up)
+    # Urutkan berdasarkan kemunculan dulu
+    raw_pivots.sort(key=lambda x: x['pos'])
+    
+    clean_pivots = []
+    for p in raw_pivots:
+        if not clean_pivots:
+            clean_pivots.append(p)
+            continue
         
-        for p in pivots:
-            if not unique_pivots:
-                unique_pivots.append(p)
-                continue
-            
-            last_p = unique_pivots[-1]
-            
-            # Jika tipe sama (High ketemu High)
-            if p['type'] == last_p['type']:
-                # Hitung jarak candle pakai 'pos' (Integer subtraction)
-                distance = p['pos'] - last_p['pos']
-                
-                # Kalau dekat (< 5 candle), merge ambil yang ekstrim
-                if distance < 5:
-                    if p['type'] == 'High' and p['price'] > last_p['price']:
-                        unique_pivots[-1] = p
-                    elif p['type'] == 'Low' and p['price'] < last_p['price']:
-                        unique_pivots[-1] = p
-                else:
-                    unique_pivots.append(p) # Jarak jauh, pivot baru
-            else:
-                unique_pivots.append(p) # Tipe beda, simpan
+        last_p = clean_pivots[-1]
+        
+        if p['type'] == last_p['type']:
+            # Jika tipe sama, KEEP YANG LEBIH EKSTRIM
+            if p['type'] == 'High':
+                if p['price'] > last_p['price']:
+                    clean_pivots[-1] = p # Replace dengan Higher High lokal
+            else: # Low
+                if p['price'] < last_p['price']:
+                    clean_pivots[-1] = p # Replace dengan Lower Low lokal
+        else:
+            # Jika tipe beda (High ketemu Low), masukkan sebagai pivot baru
+            clean_pivots.append(p)
 
-    # Labeling Logic
-    final_pivots = unique_pivots
-    highs = [p for p in final_pivots if p['type'] == 'High']
-    lows = [p for p in final_pivots if p['type'] == 'Low']
+    # 3. Labeling Logic (HH/LH/HL/LL)
+    highs = [p for p in clean_pivots if p['type'] == 'High']
+    lows = [p for p in clean_pivots if p['type'] == 'Low']
     
     for i in range(len(highs)):
         label = "H"
@@ -139,14 +113,17 @@ def get_market_structure(df, point=0.01, window=5):
             else: label = "EqL"
         lows[i]['label'] = label
 
-    # Final Sort Chronologically
+    # Merge balik (sudah pasti urut pos karena loop di atas)
     all_pivots = sorted(highs + lows, key=lambda x: x['pos'])
     
     recent_pivots = all_pivots[-5:]
     seq_list = [f"{p['type'][0]}({p['label']})" for p in recent_pivots]
     sequence_str = "->".join(seq_list)
     
-    return recent_pivots, sequence_str
+    # Return pivots, sequence, dan data pivot terakhir (untuk AI context)
+    last_pivot_data = recent_pivots[-1] if recent_pivots else None
+    
+    return recent_pivots, sequence_str, last_pivot_data
 
 def calculate_rules(data):
     if 'm5' not in data or data['m5'].empty:
@@ -162,7 +139,7 @@ def calculate_rules(data):
     
     last = df_m5.iloc[-1]
     
-    # FIX: Timezone Normalization (Safe UTC)
+    # Timezone Safety
     timestamp = last.name
     if getattr(timestamp, "tzinfo", None) is None:
         timestamp = timestamp.tz_localize("UTC")
@@ -173,12 +150,12 @@ def calculate_rules(data):
     if bid <= 0 or ask <= 0:
         return {"signal": "WAIT", "reason": "Invalid Tick", "setup": {}, "timestamp": timestamp}
 
-    # Session Filter (UTC Based)
+    # Session Filter
     candle_hour = timestamp.hour
     if candle_hour < SESSION_START_UTC or candle_hour >= SESSION_END_UTC:
          return {"signal": "WAIT", "reason": f"Outside Session ({candle_hour}h UTC)", "setup": {}, "timestamp": timestamp}
 
-    # Feed Audit & News Detector
+    # Feed Audit
     tick_msc = int(meta.get("tick_time_msc") or 0)
     tick_sec = int(meta.get("tick_time") or 0)
     broker_ts = None
@@ -199,7 +176,6 @@ def calculate_rules(data):
         # Implicit News
         if real_spread_usd > 0.35 and lag_clamped > 2.0:
             return {"signal": "WAIT", "reason": "High Volatility (Spread+Lag)", "setup": {}, "timestamp": timestamp}
-
         if lag_clamped > 8: 
              return {"signal": "WAIT", "reason": f"Critical Lag: {lag_clamped:.1f}s", "setup": {}, "timestamp": timestamp}
         elif lag_clamped > 3:
@@ -219,6 +195,8 @@ def calculate_rules(data):
     trend = "NEUTRAL"
     m15_pivots = []
     m15_sequence = "None"
+    dist_to_pivot = 0.0
+    last_pivot_info = None
     
     if 'm15' in data and not data['m15'].empty:
         df_m15 = data['m15']
@@ -228,8 +206,13 @@ def calculate_rules(data):
         if pd.isna(ema_50): return {"signal": "WAIT", "reason": "EMA NaN", "setup": {}, "timestamp": timestamp}
         trend = "BULLISH" if ema_50 > ema_200 else "BEARISH"
         
-        # Panggil Structure Extractor yang sudah diperbaiki
-        m15_pivots, m15_sequence = get_market_structure(df_m15, point=point)
+        # Panggil New Structure Logic
+        m15_pivots, m15_sequence, last_pivot_data = get_market_structure(df_m15, point=point)
+        
+        # Hitung Jarak ke Pivot Terakhir (Buat AI Context)
+        if last_pivot_data:
+            dist_to_pivot = abs(last['Close'] - last_pivot_data['price'])
+            last_pivot_info = f"{last_pivot_data['type']}@{last_pivot_data['price']:.2f}"
     else:
         return {"signal": "WAIT", "reason": "M15 Missing", "setup": {}, "timestamp": timestamp}
 
@@ -309,7 +292,12 @@ def calculate_rules(data):
             "trend_m15": trend,
             "atr_m5": atr_val,
             "ob_status": "Active" if (ob_bull or ob_bear) else "None",
-            "m15_structure": {"sequence": m15_sequence, "pivots": m15_pivots}
+            "m15_structure": {
+                "sequence": m15_sequence, 
+                "pivots": m15_pivots,
+                "last_pivot_info": last_pivot_info, # Info Pivot Terakhir
+                "dist_to_pivot": dist_to_pivot      # Jarak ke Pivot Terakhir
+            }
         },
         "risk_audit": {
             "spread_usd": real_spread_usd,
