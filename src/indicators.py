@@ -12,7 +12,6 @@ RR_RATIO          = 1.2
 MAX_TP_USD        = 8.0  
 
 def find_quality_ob(df):
-    """Mencari Order Block Valid dengan Displacement"""
     if len(df) < 100: return None, None
     subset = df.tail(100).copy()
     atr = ta.atr(subset['High'], subset['Low'], subset['Close'], length=14)
@@ -21,7 +20,6 @@ def find_quality_ob(df):
     ob_bull = None
     ob_bear = None
     
-    # Logic OB (Sudah Oke)
     for i in range(len(subset)-4, 0, -1):
         atr_next = subset['ATR'].iloc[i+1]
         if pd.isna(atr_next) or atr_next <= 0: continue
@@ -48,68 +46,60 @@ def find_quality_ob(df):
 
 def get_market_structure(df, window=5):
     """
-    Ekstrak Struktur Pivot M15 dengan Label (HH/HL/LH/LL) untuk AI.
-    Return: List of Dict [{'type': 'High', 'price': 2025.0, 'label': 'HH', 'time': '...'}]
+    Ekstrak Struktur Pivot M15 dengan Label (HH/HL/LH/LL).
+    FIX: Support Outside Bar (If-If) & Anti-Spam (Epsilon).
     """
-    # Pastikan data cukup
     if len(df) < (window * 2 + 10): return []
     
-    # Deteksi Fractal High/Low
     pivots = []
+    eps = 1e-5 # Toleransi float
     
-    # Scan window ke belakang
     for i in range(window, len(df) - window):
         curr_high = df['High'].iloc[i]
         curr_low = df['Low'].iloc[i]
         
-        # Pivot High
-        if curr_high == df['High'].iloc[i-window:i+window+1].max():
+        # Window High/Low
+        win_high = df['High'].iloc[i-window:i+window+1].max()
+        win_low  = df['Low'].iloc[i-window:i+window+1].min()
+        
+        # FIX 1 & 2: Pakai IF-IF (bukan elif) dan Epsilon
+        is_pivot_high = curr_high >= (win_high - eps)
+        is_pivot_low  = curr_low <= (win_low + eps)
+        
+        if is_pivot_high:
             pivots.append({
-                "index": i,
-                "type": "High",
-                "price": float(curr_high),
-                "time": str(df.index[i])
+                "index": i, "type": "High", 
+                "price": float(curr_high), "time": str(df.index[i])
             })
             
-        # Pivot Low
-        elif curr_low == df['Low'].iloc[i-window:i+window+1].min():
+        if is_pivot_low:
             pivots.append({
-                "index": i,
-                "type": "Low",
-                "price": float(curr_low),
-                "time": str(df.index[i])
+                "index": i, "type": "Low", 
+                "price": float(curr_low), "time": str(df.index[i])
             })
     
-    # Labeling (HH, HL, LH, LL)
-    # Kita butuh minimal 2 high atau 2 low untuk labeling
-    structured_pivots = []
-    
-    # Pisahkan Highs dan Lows
+    # Labeling Logic (HH, HL, LH, LL)
     highs = [p for p in pivots if p['type'] == 'High']
     lows = [p for p in pivots if p['type'] == 'Low']
     
-    # Labeling Highs
     for i in range(len(highs)):
-        label = "H" # Default
+        label = "H"
         if i > 0:
             if highs[i]['price'] > highs[i-1]['price']: label = "HH"
             elif highs[i]['price'] < highs[i-1]['price']: label = "LH"
             else: label = "Equal H"
         highs[i]['label'] = label
         
-    # Labeling Lows
     for i in range(len(lows)):
-        label = "L" # Default
+        label = "L"
         if i > 0:
             if lows[i]['price'] > lows[i-1]['price']: label = "HL"
             elif lows[i]['price'] < lows[i-1]['price']: label = "LL"
             else: label = "Equal L"
         lows[i]['label'] = label
 
-    # Gabung dan urutkan berdasarkan waktu/index lagi
+    # Gabung, Urutkan, dan Ambil 5 Terakhir
     all_pivots = sorted(highs + lows, key=lambda x: x['index'])
-    
-    # Ambil 5 struktur terakhir buat dikirim ke AI (biar hemat token tapi konteks dapet)
     return all_pivots[-5:]
 
 def calculate_rules(data):
@@ -135,7 +125,7 @@ def calculate_rules(data):
     if real_spread_usd > MAX_SPREAD_USD:
         return {"signal": "WAIT", "reason": f"High Spread: ${real_spread_usd:.2f}", "setup": {}, "timestamp": timestamp}
 
-    # Stale Feed Guard (With Lag Export)
+    # FIX 3: Stale Feed Audit (Raw + Clamped)
     tick_msc = int(meta.get("tick_time_msc") or 0)
     tick_sec = int(meta.get("tick_time") or 0)
     broker_ts = None
@@ -143,16 +133,18 @@ def calculate_rules(data):
     elif tick_sec > 0: broker_ts = float(tick_sec)
     
     warnings = []
-    lag_val = 0.0
+    lag_raw = 0.0
+    lag_clamped = 0.0
     
     if broker_ts:
-        lag = time.time() - broker_ts
-        lag_val = lag
-        if lag < -2: 
-             warnings.append(f"Clock Drift {lag:.1f}s")
-        lag = max(0.0, lag)
-        if lag > 15: 
-             return {"signal": "WAIT", "reason": f"Stale Feed: {lag:.1f}s", "setup": {}, "timestamp": timestamp}
+        lag_raw = time.time() - broker_ts
+        lag_clamped = max(0.0, lag_raw)
+        
+        if lag_raw < -2: 
+             warnings.append(f"Clock Drift {lag_raw:.1f}s")
+        
+        if lag_clamped > 15: 
+             return {"signal": "WAIT", "reason": f"Stale Feed: {lag_clamped:.1f}s", "setup": {}, "timestamp": timestamp}
     else:
         return {"signal": "WAIT", "reason": "No Broker TS", "setup": {}, "timestamp": timestamp}
 
@@ -163,8 +155,6 @@ def calculate_rules(data):
         return {"signal": "WAIT", "reason": "High Stop Level", "setup": {}, "timestamp": timestamp}
 
     # --- INDICATOR ANALYSIS ---
-    
-    # 1. M15 CONTEXT (Trend & Structured Pivots)
     trend = "NEUTRAL"
     m15_structure = []
     
@@ -177,18 +167,14 @@ def calculate_rules(data):
         if pd.isna(ema_50): return {"signal": "WAIT", "reason": "EMA NaN", "setup": {}, "timestamp": timestamp}
             
         trend = "BULLISH" if ema_50 > ema_200 else "BEARISH"
-        
-        # FIX: Extract Structure with Labels (HH/HL/LH/LL)
         m15_structure = get_market_structure(df_m15)
     else:
         return {"signal": "WAIT", "reason": "M15 Missing", "setup": {}, "timestamp": timestamp}
 
-    # 2. ATR & BUFFER (M5)
     atr_val = ta.atr(df_m5['High'], df_m5['Low'], df_m5['Close'], length=14).iloc[-1]
     if pd.isna(atr_val) or atr_val <= 0: return {"signal": "WAIT", "reason": "ATR NaN", "setup": {}, "timestamp": timestamp}
     sweep_buffer = 0.2 * atr_val 
 
-    # 3. SMC LOGIC
     ob_bull, ob_bear = find_quality_ob(df_m5)
     
     signal = "WAIT"
@@ -201,7 +187,6 @@ def calculate_rules(data):
         touched = last['Low'] <= ob_high
         held = last['Low'] >= (ob_low - sweep_buffer)
         rejected = last['Close'] > ob_high
-        # FIX: Tighten 'Don't Chase' Rule (Max 0.2 ATR dari OB High)
         near_ob = last['Close'] <= (ob_high + atr_val * 0.2) 
         
         if touched and held and rejected and near_ob:
@@ -209,13 +194,12 @@ def calculate_rules(data):
             reason = "SMC: Bullish OB Retest + M15 Trend"
             ob_used = ob_bull
 
-    # LOGIC SELL
-    if trend == "BEARISH" and ob_bear:
+    # FIX 4: Defensive Coding (ELIF for SELL)
+    elif trend == "BEARISH" and ob_bear:
         ob_low, ob_high = ob_bear
         touched = last['High'] >= ob_low
         held = last['High'] <= (ob_high + sweep_buffer)
         rejected = last['Close'] < ob_low
-        # FIX: Tighten 'Don't Chase'
         near_ob = last['Close'] >= (ob_low - atr_val * 0.2)
         
         if touched and held and rejected and near_ob:
@@ -231,7 +215,6 @@ def calculate_rules(data):
     if signal in ["BUY", "SELL"]:
         entry_price = ask if signal == "BUY" else bid
         
-        # --- SL BERBASIS STRUKTUR ---
         if signal == "BUY":
             ob_low_point = ob_used[0]
             structural_sl = ob_low_point - sweep_buffer
@@ -241,18 +224,15 @@ def calculate_rules(data):
             structural_sl = ob_high_point + sweep_buffer
             raw_sl_dist = structural_sl - entry_price
         
-        # FIX: Guard Raw SL Negatif (Data error)
         if raw_sl_dist <= 0:
-             return {"signal": "WAIT", "reason": "Invalid SL Distance (Negative)", "setup": {}, "timestamp": timestamp}
+             return {"signal": "WAIT", "reason": "Invalid SL Distance", "setup": {}, "timestamp": timestamp}
 
-        # Check Max Width
         if raw_sl_dist > TARGET_SL_MAX_USD:
              return {"signal": "WAIT", "reason": f"Structure Too Wide (${raw_sl_dist:.2f})", "setup": {}, "timestamp": timestamp}
 
         final_sl_dist = max(TARGET_SL_MIN_USD, raw_sl_dist)
         sl_usd_dist = final_sl_dist
         
-        # Spread Ratio Check
         if real_spread_usd > (final_sl_dist * 0.15):
              return {"signal": "WAIT", "reason": "Spread too expensive", "setup": {}, "timestamp": timestamp}
         
@@ -273,23 +253,24 @@ def calculate_rules(data):
             "tp": tp_price
         }
 
-    # Meta Export Lengkap
     export_meta = {
         "indicators": {
             "trend_m15": trend,
             "atr_m5": atr_val,
             "ob_status": "Active" if (ob_bull or ob_bear) else "None",
-            "m15_structure": m15_structure # Kirim pivot list lengkap
+            "m15_structure": m15_structure 
         },
         "risk_audit": {
             "spread_usd": real_spread_usd,
             "sl_usd": sl_usd_dist,
             "tp_usd": tp_usd_dist,
-            "warnings": warnings
+            "warnings": warnings,
+            "tick_lag_sec_raw": lag_raw, # Audit Drift
+            "tick_lag_sec": lag_clamped  # Audit Safety
         },
-        "warnings": warnings, # Export di root meta juga sesuai request
+        "warnings": warnings, 
         "spread": real_spread_usd,
-        "tick_lag_sec": lag_val, # Export Lag
+        "tick_lag_sec": lag_clamped,
         "candle": {
             "close": float(last['Close']),
             "high": float(last['High']),
