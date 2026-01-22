@@ -26,8 +26,6 @@ def find_quality_ob(df):
     for i in range(len(subset)-4, 0, -1):
         atr_next = subset['ATR'].iloc[i+1]
         if pd.isna(atr_next) or atr_next <= 0: continue
-        
-        # BULLISH
         if subset['Close'].iloc[i] < subset['Open'].iloc[i]: 
             body_next = abs(subset['Close'].iloc[i+1] - subset['Open'].iloc[i+1])
             if subset['Close'].iloc[i+1] > subset['Open'].iloc[i+1] and body_next > (atr_next * 0.8):
@@ -37,8 +35,6 @@ def find_quality_ob(df):
     for i in range(len(subset)-4, 0, -1):
         atr_next = subset['ATR'].iloc[i+1]
         if pd.isna(atr_next) or atr_next <= 0: continue
-
-        # BEARISH
         if subset['Close'].iloc[i] > subset['Open'].iloc[i]:
             body_next = abs(subset['Close'].iloc[i+1] - subset['Open'].iloc[i+1])
             if subset['Close'].iloc[i+1] < subset['Open'].iloc[i+1] and body_next > (atr_next * 0.8):
@@ -49,13 +45,13 @@ def find_quality_ob(df):
 
 def get_market_structure(df, point=0.01, atr_val=1.0, window=5):
     """
-    Ekstrak Struktur Pivot ZigZag Pro:
-    - FIX 1: Tie-Breaker Sort untuk Outside Bar.
-    - FIX 2: Strict Alternating Logic (High-Low-High).
-    - FIX 3: Deviation Filter (Min Dev) biar gak noise.
+    Ekstrak Struktur Pivot V14 (The Flawless):
+    - Tie-Breaker Sort.
+    - Outside Bar Compression (Anti Double Pivot).
+    - Strict Alternating Logic + Dynamic Leg Size Update.
     """
     if len(df) > 200: df = df.tail(200)
-    if len(df) < (window * 2 + 10): return [], "Insufficient Data", None
+    if len(df) < (window * 2 + 10): return [], "Insuff Data", None, []
     
     raw_pivots = []
     eps = point * 1.0 
@@ -64,7 +60,6 @@ def get_market_structure(df, point=0.01, atr_val=1.0, window=5):
     for i in range(window, len(df) - window):
         curr_high = df['High'].iloc[i]
         curr_low = df['Low'].iloc[i]
-        
         win_high = df['High'].iloc[i-window:i+window+1].max()
         win_low  = df['Low'].iloc[i-window:i+window+1].min()
         
@@ -73,15 +68,15 @@ def get_market_structure(df, point=0.01, atr_val=1.0, window=5):
         if curr_low <= (win_low + eps):
             raw_pivots.append({"pos": i, "type": "Low", "price": float(curr_low), "time": str(df.index[i])})
     
-    # FIX 1: Tie-Breaker Sort (Posisi -> Tipe)
-    # 0=Low, 1=High (Urutan: Kalau di bar yg sama ada H & L, Low dulu biar konsisten naik)
+    # Sort dulu biar bisa compress
     type_order = {"Low": 0, "High": 1}
     raw_pivots.sort(key=lambda x: (x["pos"], type_order[x["type"]]))
     
-    # FIX 3: Deviation Filter (Minimal swing $1.0 atau 0.3 ATR)
+    # FIX: Deviation Filter
     min_dev = max(1.0, atr_val * 0.3) 
     
     clean_pivots = []
+    
     for p in raw_pivots:
         if not clean_pivots:
             clean_pivots.append(p)
@@ -89,22 +84,43 @@ def get_market_structure(df, point=0.01, atr_val=1.0, window=5):
         
         last_p = clean_pivots[-1]
         
-        # 2. Strict Alternating + Deviation Logic
+        # FIX: Outside Bar Compression (Jika posisi sama)
+        if p['pos'] == last_p['pos']:
+            # Pilih yang beda tipe dari pivot SEBELUMNYA (biar alternating)
+            # Kalau pivot list cuma 1 (last_p), kita cek logic manual
+            if len(clean_pivots) >= 2:
+                prev_prev = clean_pivots[-2]
+                # Kalau prev_prev = High, kita butuh Low.
+                if prev_prev['type'] == 'High' and p['type'] == 'Low':
+                    clean_pivots[-1] = p 
+                elif prev_prev['type'] == 'Low' and p['type'] == 'High':
+                    clean_pivots[-1] = p
+            # Kalau belum cukup data, skip double pivot di bar yang sama (ambil pertama aja)
+            continue
+
+        # Logic Alternating Standard
         if p['type'] == last_p['type']:
-            # Tipe SAMA: Update jika lebih ekstrim
-            if p['type'] == 'High':
-                if p['price'] > last_p['price']: clean_pivots[-1] = p
-            else: # Low
-                if p['price'] < last_p['price']: clean_pivots[-1] = p
+            # Tipe SAMA: Update jika lebih ekstrim + RECOMPUTE LEG SIZE
+            updated = False
+            if p['type'] == 'High' and p['price'] > last_p['price']:
+                updated = True
+            elif p['type'] == 'Low' and p['price'] < last_p['price']:
+                updated = True
+            
+            if updated:
+                # FIX: Recompute Leg Size relatif terhadap pivot sebelumnya (jika ada)
+                if len(clean_pivots) >= 2:
+                    prev_pivot = clean_pivots[-2]
+                    p['leg_size'] = round(abs(p['price'] - prev_pivot['price']), 2)
+                clean_pivots[-1] = p
         else:
             # Tipe BEDA: Cek Jarak (Deviation)
             dist = abs(p['price'] - last_p['price'])
             if dist >= min_dev:
-                # Tambahin Leg Size (Jarak dari pivot sebelumnya)
                 p['leg_size'] = round(dist, 2)
                 clean_pivots.append(p)
 
-    # 3. Labeling Logic
+    # Labeling Logic
     highs = [p for p in clean_pivots if p['type'] == 'High']
     lows = [p for p in clean_pivots if p['type'] == 'Low']
     
@@ -124,16 +140,16 @@ def get_market_structure(df, point=0.01, atr_val=1.0, window=5):
             else: label = "EqL"
         lows[i]['label'] = label
 
-    # Merge & Sort
     all_pivots = sorted(highs + lows, key=lambda x: x['pos'])
-    
     recent_pivots = all_pivots[-5:]
     seq_list = [f"{p['type'][0]}({p['label']})" for p in recent_pivots]
     sequence_str = "->".join(seq_list)
     
+    # Extract Leg Sizes for AI
+    last_3_legs = [p.get('leg_size', 0) for p in recent_pivots if 'leg_size' in p][-3:]
     last_pivot_data = recent_pivots[-1] if recent_pivots else None
     
-    return recent_pivots, sequence_str, last_pivot_data
+    return recent_pivots, sequence_str, last_pivot_data, last_3_legs
 
 def calculate_rules(data):
     if 'm5' not in data or data['m5'].empty:
@@ -146,26 +162,20 @@ def calculate_rules(data):
     bid = float(tick.get('bid', 0) or 0)
     ask = float(tick.get('ask', 0) or 0)
     point = float(tick.get('point', 0.01) or 0.01)
-    
     last = df_m5.iloc[-1]
     
     # Timezone Safety
     timestamp = last.name
-    if getattr(timestamp, "tzinfo", None) is None:
-        timestamp = timestamp.tz_localize("UTC")
-    else:
-        timestamp = timestamp.tz_convert("UTC")
+    if getattr(timestamp, "tzinfo", None) is None: timestamp = timestamp.tz_localize("UTC")
+    else: timestamp = timestamp.tz_convert("UTC")
 
     # --- GUARD BLOCK ---
     if bid <= 0 or ask <= 0:
         return {"signal": "WAIT", "reason": "Invalid Tick", "setup": {}, "timestamp": timestamp}
-
-    # Session Filter
     candle_hour = timestamp.hour
     if candle_hour < SESSION_START_UTC or candle_hour >= SESSION_END_UTC:
          return {"signal": "WAIT", "reason": f"Outside Session ({candle_hour}h UTC)", "setup": {}, "timestamp": timestamp}
 
-    # Feed Audit
     tick_msc = int(meta.get("tick_time_msc") or 0)
     tick_sec = int(meta.get("tick_time") or 0)
     broker_ts = None
@@ -179,11 +189,8 @@ def calculate_rules(data):
     if broker_ts:
         lag_raw = time.time() - broker_ts
         lag_clamped = max(0.0, lag_raw)
-        
         if lag_raw < -2: warnings.append(f"Clock Drift {lag_raw:.1f}s")
-        
         real_spread_usd = abs(ask - bid)
-        # Implicit News
         if real_spread_usd > 0.35 and lag_clamped > 2.0:
             return {"signal": "WAIT", "reason": "High Volatility (Spread+Lag)", "setup": {}, "timestamp": timestamp}
         if lag_clamped > 8: 
@@ -196,7 +203,6 @@ def calculate_rules(data):
     real_spread_usd = abs(ask - bid)
     if real_spread_usd > MAX_SPREAD_USD:
         return {"signal": "WAIT", "reason": f"High Spread: ${real_spread_usd:.2f}", "setup": {}, "timestamp": timestamp}
-
     stop_usd = (int(tick.get("stop_level", 0) or 0)) * point
     if stop_usd > 2.0:
         return {"signal": "WAIT", "reason": "High Stop Level", "setup": {}, "timestamp": timestamp}
@@ -207,6 +213,7 @@ def calculate_rules(data):
     m15_sequence = "None"
     dist_to_pivot = 0.0
     last_pivot_info = "None"
+    leg_sizes = []
     
     if 'm15' in data and not data['m15'].empty:
         df_m15 = data['m15']
@@ -216,13 +223,11 @@ def calculate_rules(data):
         if pd.isna(ema_50): return {"signal": "WAIT", "reason": "EMA NaN", "setup": {}, "timestamp": timestamp}
         trend = "BULLISH" if ema_50 > ema_200 else "BEARISH"
         
-        # Hitung ATR M15 buat Deviation Filter
         atr_m15 = ta.atr(df_m15['High'], df_m15['Low'], df_m15['Close'], length=14).iloc[-1]
         
-        # Panggil ZigZag Structure Logic
-        m15_pivots, m15_sequence, last_pivot_data = get_market_structure(df_m15, point=point, atr_val=atr_m15)
+        # Panggil V14 Structure Logic
+        m15_pivots, m15_sequence, last_pivot_data, leg_sizes = get_market_structure(df_m15, point=point, atr_val=atr_m15)
         
-        # Hitung Jarak ke Pivot Terakhir (Pakai Mid Price biar Fair)
         mid_price = (bid + ask) / 2.0
         if last_pivot_data:
             dist_to_pivot = abs(mid_price - last_pivot_data['price'])
@@ -269,7 +274,6 @@ def calculate_rules(data):
 
     if signal in ["BUY", "SELL"]:
         entry_price = ask if signal == "BUY" else bid
-        
         if signal == "BUY":
             ob_low_point = ob_used[0]
             structural_sl = ob_low_point - sweep_buffer
@@ -284,7 +288,6 @@ def calculate_rules(data):
 
         final_sl_dist = max(TARGET_SL_MIN_USD, raw_sl_dist)
         sl_usd_dist = final_sl_dist
-        
         if real_spread_usd > (final_sl_dist * 0.15): return {"signal": "WAIT", "reason": "Spread too expensive", "setup": {}, "timestamp": timestamp}
         
         raw_tp_dist = final_sl_dist * RR_RATIO
@@ -297,10 +300,9 @@ def calculate_rules(data):
         else:
             sl_price = entry_price + final_sl_dist
             tp_price = entry_price - final_tp_dist
-
         setup = {"entry": entry_price, "sl": sl_price, "tp": tp_price}
 
-    # Meta Export Lengkap
+    # Meta Export Lengkap V14
     export_meta = {
         "indicators": {
             "trend_m15": trend,
@@ -310,7 +312,8 @@ def calculate_rules(data):
                 "sequence": m15_sequence, 
                 "pivots": m15_pivots,
                 "last_pivot": last_pivot_info,
-                "dist_to_pivot": dist_to_pivot
+                "dist_to_pivot": dist_to_pivot,
+                "leg_sizes": leg_sizes # Export Leg Sizes ke AI
             }
         },
         "risk_audit": {
