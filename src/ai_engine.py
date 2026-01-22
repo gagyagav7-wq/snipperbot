@@ -16,43 +16,39 @@ def ask_ai_judge(signal_type, bot_reason, metrics):
     if MODEL is None: init_ai()
     if MODEL is None: return {"decision": "REJECT", "reason": "AI Config Error"}
 
-    # Data Structure M15
-    m15_data = metrics.get('m15_structure', {})
-    rel_pos = m15_data.get('relative_pos', 0.5)
-
-    # (Update Prompt ini)
+    # Extract Structure Data
+    m15_struct = metrics.get('m15_structure', [])
+    trend = metrics.get('trend_m15', 'NEUTRAL')
 
     prompt = f"""
-    Role: Senior SMC & Elliott Wave Strategist (XAUUSD Scalping).
+    Role: Senior XAUUSD Scalper (SMC & Elliott Wave).
     
     Signal: {signal_type}
     Reason: {bot_reason}
-    Metrics: {json.dumps(metrics)}
+    M15 Trend: {trend}
     
-    Context Data:
-    - Recent Pivots (M15): {metrics.get('m15_pivots')}
-    - Trend: {metrics.get('trend_m15')}
+    Recent M15 Structure (Pivots): 
+    {json.dumps(m15_struct, indent=2)}
     
-    Task: Validate Structure.
+    Task: Validate Trade Context.
     
     ELLIOTT WAVE RULES:
-    1. Read the 'm15_pivots'. 
-       - If BUYING: Do we have a Higher High (HH) or Higher Low (HL) sequence? (Good)
-       - If BUYING but pivots show Lower Highs (LH) + Lower Lows (LL): Counter-trend risk! (Reject/Caution)
-       - If SELLING: Look for LH/LL sequence.
-       
-    2. Over-Extension Check:
-       - If price is far above the last High pivot -> Buying Top Risk (Wave 5 end).
-       
-    DECISION:
-    - APPROVE if structure supports the direction (Impulsive move).
-    - REJECT if trying to catch a falling knife (Correction) without clear structure shift.
+    1. Check Pivot Labels (HH, HL, LH, LL).
+       - BUY SIGNAL requires a sequence of Higher Highs (HH) or Higher Lows (HL).
+       - SELL SIGNAL requires Lower Lows (LL) or Lower Highs (LH).
+    2. Identify Phase:
+       - If price is making HH/HL -> Impulse Phase (Good for Buy).
+       - If price is making LH/LL -> Correction/Down Trend (Bad for Buy).
+    
+    DECISION LOGIC:
+    - APPROVE if structure aligns with signal direction (e.g. Buy on HL).
+    - REJECT if signal fights the structure (e.g. Buy after a clear LH & LL sequence).
     
     Output JSON ONLY:
     {{
       "decision": "APPROVE" or "REJECT",
       "confidence": 0-100,
-      "reason": "Explain wave structure based on pivots",
+      "reason": "Explain structure (e.g. 'Valid buy on HL formation')",
       "wave_bias": "Impulse/Correction"
     }}
     """
