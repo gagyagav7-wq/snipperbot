@@ -27,12 +27,12 @@ def send_telegram_html(message):
     except: pass
 
 def main():
-    print("="*40 + "\n💀 GOLD KILLER PRO: REALTIME EDITION 💀\n" + "="*40)
+    print("="*40 + "\n💀 GOLD KILLER PRO: BANK GRADE 💀\n" + "="*40)
     logger = TradeLogger()
     
     last_candle_ts = None
     last_logged_ts = None
-    last_ai_key = None 
+    last_ai_fingerprint = None # REVISI: Pakai fingerprint lengkap
 
     while True:
         try:
@@ -43,19 +43,15 @@ def main():
             # --- PREP DATA ---
             df_5m = data['m5']
             last_bar = df_5m.iloc[-1]
-            
-            # Timestamp Safe
             ts = last_bar.name
             if getattr(ts, "tzinfo", None) is None: ts = ts.tz_localize("UTC")
             current_ts = int(ts.timestamp())
 
-            # Ambil Realtime Tick buat TP/SL instan
             tick = data.get("tick", {})
             bid = tick.get("bid", 0.0)
             ask = tick.get("ask", 0.0)
 
-            # --- 1. STATUS CHECK (REALTIME) ---
-            # Kita lempar bid/ask ke fungsi baru
+            # --- 1. STATUS CHECK ---
             status = check_signal_status(last_bar['High'], last_bar['Low'], bid, ask)
             
             if status in ["TP_HIT", "SL_HIT", "EXPIRED"]:
@@ -76,18 +72,18 @@ def main():
 
                 signal = contract["signal"]
                 
-                # --- 3. SIGNAL & AI GATE ---
+                # --- 3. AI GATE ---
                 if signal in ["BUY", "SELL"] and status == "NONE":
-                    # Guard: Pastikan setup ada isinya
-                    setup = contract.get("setup")
+                    setup = contract.get("setup", {})
                     if not setup or "entry" not in setup:
-                        print("⚠️ Setup missing from contract, skipping...")
+                        print("⚠️ Setup incomplete, skipping...")
                     else:
-                        # Smart Gate Key
-                        current_ai_key = f"{current_ts}_{signal}"
+                        # FINGERPRINT: Waktu + Arah + Harga Entry
+                        # Kalau entry geser dikit karena rules update, AI boleh debat lagi
+                        current_fingerprint = f"{current_ts}_{signal}_{setup['entry']}"
                         
-                        if current_ai_key != last_ai_key:
-                            last_ai_key = current_ai_key
+                        if current_fingerprint != last_ai_fingerprint:
+                            last_ai_fingerprint = current_fingerprint # Lock
                             
                             print(f"🤖 AI Judging {signal}...")
                             metrics = {
@@ -100,15 +96,13 @@ def main():
                             decision = str(judge.get("decision", "REJECT")).strip().upper()
                             
                             if decision == "APPROVE":
-                                icon = "🟢" if signal == "BUY" else "🔴"
-                                
-                                # Escape semua inputan biar aman
+                                # HTML Safe
                                 ai_reason = html.escape(str(judge.get("reason", "No Reason")))
                                 e_entry = html.escape(str(setup['entry']))
                                 e_sl = html.escape(str(setup['sl']))
                                 e_tp = html.escape(str(setup['tp']))
                                 
-                                text = (f"{icon} <b>SIGNAL {signal} APPROVED</b>\n\n"
+                                text = (f"{contract['signal'] == 'BUY' and '🟢' or '🔴'} <b>SIGNAL {signal} APPROVED</b>\n\n"
                                         f"Entry: <code>{e_entry}</code>\n"
                                         f"SL: <code>{e_sl}</code>\n"
                                         f"TP: <code>{e_tp}</code>\n\n"
@@ -116,7 +110,8 @@ def main():
                                 
                                 send_telegram_html(text)
                                 
-                                save_state_atomic(
+                                # STATE SAVE CHECK
+                                if save_state_atomic(
                                     active=True,
                                     sig_type=signal,
                                     sl=setup['sl'],
@@ -124,9 +119,12 @@ def main():
                                     entry=setup['entry'],
                                     reason=judge.get("reason", ""),
                                     candle_ts=current_ts
-                                )
-                                status = "STILL_OPEN"
-                                print(f"✅ {signal} SENT & LOCKED")
+                                ):
+                                    status = "STILL_OPEN"
+                                    print(f"✅ {signal} SENT & LOCKED")
+                                else:
+                                    print("🚨 FAILED TO LOCK STATE! Ignoring signal to prevent loop.")
+                                    send_telegram_html("⚠️ <b>SYSTEM ERROR:</b> Disk Write Failed!")
                             else:
                                 print(f"❌ AI REJECTED: {judge.get('reason')}")
                 
