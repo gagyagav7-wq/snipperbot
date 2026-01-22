@@ -16,12 +16,11 @@ def ask_ai_judge(signal_type, bot_reason, metrics):
     if MODEL is None: init_ai()
     if MODEL is None: return {"decision": "REJECT", "reason": "AI Config Error"}
 
-    # Extract Structure Data
-    m15_struct = metrics.get('m15_structure', [])
-    trend = metrics.get('trend_m15', 'NEUTRAL')
-
     # (Update Prompt Only)
 
+    m15_data = metrics.get('indicators', {}).get('m15_structure', {})
+    sequence = m15_data.get('sequence', 'N/A')
+    
     prompt = f"""
     Role: Senior XAUUSD Scalper (SMC & Elliott Wave).
     
@@ -29,28 +28,26 @@ def ask_ai_judge(signal_type, bot_reason, metrics):
     Reason: {bot_reason}
     M15 Trend: {trend}
     
-    Recent M15 Structure (Pivots): 
-    {json.dumps(m15_struct, indent=2)}
+    M15 Structure Sequence: {sequence}
+    (Format: Type(Label) -> Next Type(Label)... Chronological Order)
     
     Task: Validate Trade Context.
     
-    DEFINITIONS:
-    - HH (Higher High) / LH (Lower High) -> Applies to Pivot type 'High'.
-    - HL (Higher Low) / LL (Lower Low) -> Applies to Pivot type 'Low'.
+    STRUCTURE RULES:
+    1. BUY SIGNAL: Look for "L(HL) -> H(HH)" or at least "L(HL)".
+       - Reject if sequence shows "H(LH) -> L(LL)" (Downtrend Structure).
+    2. SELL SIGNAL: Look for "H(LH) -> L(LL)" or at least "H(LH)".
+       - Reject if sequence shows "L(HL) -> H(HH)" (Uptrend Structure).
     
-    ELLIOTT WAVE RULES:
-    1. Trend Confirmation:
-       - BUY SIGNAL: Requires HL or HH sequence. Ideally buying a HL.
-       - SELL SIGNAL: Requires LH or LL sequence. Ideally selling a LH.
-    2. Phase Check:
-       - If recent structure is LH + LL -> Down Trend Impulse. Risky to Buy.
-       - If recent structure is HH + HL -> Up Trend Impulse. Risky to Sell.
+    DECISION:
+    - APPROVE if structure sequence supports the trend direction.
+    - REJECT if signal is fighting the sequence (e.g. Buy on LL).
     
     Output JSON ONLY:
     {{
       "decision": "APPROVE" or "REJECT",
       "confidence": 0-100,
-      "reason": "Explain structure alignment",
+      "reason": "Explain using structure sequence",
       "wave_bias": "Impulse/Correction"
     }}
     """
