@@ -32,16 +32,27 @@ def is_bot_running():
         return False
 
 def kill_zombies():
+    """Smart Terminator: Anti-Suicide & Sopan."""
+    my_pid = str(os.getpid()) # PID Watchdog sendiri
     try:
         pids = subprocess.check_output(["pgrep", "-f", "python.*run_bot.py"]).decode().split()
         if not pids: return
-        # Tahap 1: Sopan
-        for pid in pids: subprocess.run(["kill", "-TERM", pid], check=False)
+
+        # Filter PID Watchdog biar gak bunuh diri
+        target_pids = [p for p in pids if p != my_pid]
+        if not target_pids: return
+
+        # Tahap 1: Sopan (SIGTERM)
+        for pid in target_pids: subprocess.run(["kill", "-TERM", pid], check=False)
         time.sleep(3)
-        # Tahap 2: Paksa
+
+        # Tahap 2: Paksa (SIGKILL)
         pids_left = subprocess.check_output(["pgrep", "-f", "python.*run_bot.py"]).decode().split()
-        for pid in pids_left: subprocess.run(["kill", "-KILL", pid], check=False)
+        target_left = [p for p in pids_left if p != my_pid]
+        
+        for pid in target_left: subprocess.run(["kill", "-KILL", pid], check=False)
         time.sleep(1)
+            
     except: pass
 
 def restart_bot():
@@ -56,7 +67,7 @@ def restart_bot():
                 stdout=f, stderr=f
             )
         
-        # FIX: Grace period dinaikkan jadi 20 detik biar bot sempat loading modul
+        # Grace period awal
         time.sleep(20) 
         if is_bot_running(): return True
         return False
@@ -66,11 +77,11 @@ def restart_bot():
 
 # --- MAIN LOOP ---
 print(f"🐕 WATCHDOG GUARDING: {PROJECT_DIR}")
-alert("🐕 <b>WATCHDOG STARTED</b>\nSystem: Final No-Drama Edition")
+alert("🐕 <b>WATCHDOG STARTED</b>\nSystem: Self-Preservation Mode")
 
 error_count = 0
-last_critical_ts = 0  # Timer khusus Critical
-last_recovered_ts = 0 # Timer khusus Recovered
+last_critical_ts = 0
+last_recovered_ts = 0
 ALERT_COOLDOWN = 300 
 
 while True:
@@ -80,22 +91,27 @@ while True:
         
         if error_count <= 3:
             alert(f"⚠️ <b>BOT CRASHED</b> (x{error_count})\nRestarting...")
+            
             if restart_bot():
-                alert("✅ <b>RESTART SUCCESS</b>")
+                # FIX: Quick Re-Check buat deteksi Crash-on-Boot
+                time.sleep(10)
+                if is_bot_running():
+                    alert("✅ <b>RESTART SUCCESS</b>\nEngine stable.")
+                else:
+                    alert("🚨 <b>BOOT FAILED</b>\nBot died immediately after restart.")
+                    # Biarkan error_count nambah di loop berikutnya
             else:
                 alert("❌ <b>RESTART STALLED</b>")
         else:
-            # FIX: Gunakan timer terpisah buat Critical Spam
             if time.time() - last_critical_ts > 60:
-                alert(f"🚨 <b>CRITICAL FAILURE</b>\nAuto-restart failed 3 times.\nManual Check Required!")
+                alert(f"🚨 <b>CRITICAL FAILURE</b>\nAuto-restart failed 3 times.\nMANUAL INTERVENTION NEEDED!")
                 last_critical_ts = time.time()
             time.sleep(60)
             
     else:
         if error_count > 0:
-            # FIX: Gunakan timer terpisah buat Recovered
             if time.time() - last_recovered_ts > ALERT_COOLDOWN:
-                alert("✅ <b>BOT RECOVERED</b>\nSystem stable.")
+                alert("✅ <b>BOT RECOVERED</b>\nRunning normally.")
                 last_recovered_ts = time.time()
             error_count = 0 
             
