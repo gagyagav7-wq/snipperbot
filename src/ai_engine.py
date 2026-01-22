@@ -16,27 +16,31 @@ def ask_ai_judge(signal_type, bot_reason, metrics):
     if MODEL is None: init_ai()
     if MODEL is None: return {"decision": "REJECT", "reason": "AI Config Error"}
 
-    # Prompt Khusus Scalping XAUUSD (SMC + EW Bias)
+    # (Bagian Prompt di src/ai_engine.py update jadi gini)
+
     prompt = f"""
-    Role: Professional XAUUSD Scalper (SMC & Elliott Wave Expert).
+    Role: SMC & Elliott Wave Scalper (XAUUSD).
     
     Signal: {signal_type}
     Reason: {bot_reason}
     Metrics: {json.dumps(metrics)}
     
-    Task: Validate this scalping setup (Target 30-50 pips).
+    Data Context:
+    - Trend M15: {metrics.get('trend_m15')}
+    - M15 Structure: {json.dumps(metrics.get('m15_structure'))}
     
-    Checklist:
-    1. Trend Context: Is the trade aligned with the immediate momentum?
-    2. Elliott Wave Bias: Does this look like a risky corrective wave (Wave 2/4/B)? If yes, REJECT.
-    3. Price Action: Is there a clear rejection/reaction?
+    Task: Validate Setup (SL $3-$5).
+    1. Elliott Wave Check: Compare 'current_price' with 'm15_structure'. 
+       - If buying near M15 High -> Risk of Wave 5 ending / Wave B correction.
+       - If selling near M15 Low -> Risk of Wave 5 ending.
+    2. Trend & Momentum: Confirm trend alignment.
     
     Output JSON ONLY:
     {{
       "decision": "APPROVE" or "REJECT",
       "confidence": 0-100,
-      "reason": "Technical reason in 10 words (e.g. 'Valid impulse wave 3, clear rejection')",
-      "wave_bias": "Impulse/Correction/Unknown"
+      "reason": "Technical rationale",
+      "wave_bias": "Impulse/Correction"
     }}
     """
 
