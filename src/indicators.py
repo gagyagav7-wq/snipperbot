@@ -1,139 +1,157 @@
 import pandas as pd
 import pandas_ta as ta
 import numpy as np
+import time
 from datetime import datetime, timezone
 
 # --- KONFIGURASI SCALPER (USD ABSOLUTE) ---
-# XAUUSD: $1 gerak harga = 100 points (di broker 2 digit) atau 1000 points (3 digit)
-# Kita pakai USD Price biar anti-salah.
-
-TARGET_SL_MIN_USD = 3.0  # Min SL $3 (setara 30 pips umum)
-TARGET_SL_MAX_USD = 5.0  # Max SL $5 (setara 50 pips umum)
-MAX_SPREAD_USD    = 0.50 # Spread maks $0.50 (50 cents / 5 pips). Lebih dari ini SKIP.
-RR_RATIO          = 1.2  # Risk Reward 1:1.2 (Winrate Priority)
-MAX_TP_USD        = 8.0  # Cap TP maks $8 (biar gak kejauhan di M5)
+# TARGET: 30-50 Pips Scalping Gold
+# Definisi umum Scalper Indo: 1 Pip = $0.10, 10 Pips = $1.00
+# Jadi 30 Pips = Pergerakan harga $3.00
+TARGET_SL_MIN_USD = 3.0  
+TARGET_SL_MAX_USD = 5.0  
+RR_RATIO          = 1.2  
+MAX_TP_USD        = 8.0  
+MAX_SPREAD_USD    = 0.50 # Maksimal spread 50 cents ($0.50). Lebih dari ini SKIP.
 
 def find_quality_ob(df):
     """Mencari Order Block Valid dengan Displacement & ATR Guard"""
+    if len(df) < 100: return None, None
     subset = df.tail(100).copy()
-    # Hitung ATR buat ngukur volatilitas & displacement
     atr = ta.atr(subset['High'], subset['Low'], subset['Close'], length=14)
     subset['ATR'] = atr
     
     ob_bull = None
     ob_bear = None
     
-    # Scan Mundur (Cari yang paling fresh)
+    # Loop Mundur
     for i in range(len(subset)-4, 0, -1):
         current_atr = subset['ATR'].iloc[i]
-        if pd.isna(current_atr) or current_atr <= 0: continue # Guard NaN
+        # GUARD: Skip jika ATR NaN (Data belum cukup)
+        if pd.isna(current_atr) or current_atr <= 0: continue
         
-        # BULLISH OB: Candle Merah -> diikuti Candle Hijau Gede (Displacement)
+        # BULLISH OB
         if subset['Close'].iloc[i] < subset['Open'].iloc[i]: 
             body_next = abs(subset['Close'].iloc[i+1] - subset['Open'].iloc[i+1])
-            # Syarat: Candle besoknya Bullish & Body > 0.8x ATR (Impulsif)
             if subset['Close'].iloc[i+1] > subset['Open'].iloc[i+1] and body_next > (current_atr * 0.8):
-                ob_bull = (subset['Low'].iloc[i], subset['High'].iloc[i]) # Zone: Low - High
+                ob_bull = (subset['Low'].iloc[i], subset['High'].iloc[i]) 
                 break 
 
     for i in range(len(subset)-4, 0, -1):
         current_atr = subset['ATR'].iloc[i]
         if pd.isna(current_atr) or current_atr <= 0: continue
 
-        # BEARISH OB: Candle Hijau -> diikuti Candle Merah Gede
+        # BEARISH OB
         if subset['Close'].iloc[i] > subset['Open'].iloc[i]:
             body_next = abs(subset['Close'].iloc[i+1] - subset['Open'].iloc[i+1])
             if subset['Close'].iloc[i+1] < subset['Open'].iloc[i+1] and body_next > (current_atr * 0.8):
-                ob_bear = (subset['Low'].iloc[i], subset['High'].iloc[i]) # Zone: Low - High
+                ob_bear = (subset['Low'].iloc[i], subset['High'].iloc[i])
                 break
 
     return ob_bull, ob_bear
 
 def calculate_rules(data):
-    # 1. PREP DATA & DATA GUARD
+    # 1. PREP DATA & INTEGRITY CHECKS
+    # Pastikan data wajib ada
     if 'm5' not in data or data['m5'].empty:
-        return {"signal": "WAIT", "reason": "Data Empty", "setup": {}, "timestamp": None}
-
-    df = data['m5'].copy()
-    tick = data.get('tick', {})
+        return {"signal": "WAIT", "reason": "Data M5 Empty", "setup": {}, "timestamp": None}
     
-    # Ambil Bid/Ask dengan aman (Cast float & default 0)
+    # Ambil Tick Data Realtime
+    tick = data.get('tick', {})
+    meta = data.get('meta', {})
+    
     bid = float(tick.get('bid', 0) or 0)
     ask = float(tick.get('ask', 0) or 0)
     
-    last = df.iloc[-1]
-    prev = df.iloc[-2]
-    timestamp = last.name
-
-    # --- GUARD BLOCK 1: MARKET INTEGRITY ---
-    # 1. Market Closed / Data Error
+    # GUARD 1: Market Closed / Invalid Data
     if bid <= 0 or ask <= 0:
-        return {"signal": "WAIT", "reason": "Market Closed / Invalid Tick", "setup": {}, "timestamp": timestamp}
+        return {"signal": "WAIT", "reason": "Invalid Tick (Market Closed?)", "setup": {}, "timestamp": None}
 
-    # 2. Spread Guard (USD Price Based)
-    point = float(tick.get('point', 0.01) or 0.01)
-    spread_raw = float(tick.get('spread', 0) or 0)
-    # Konversi spread points ke USD. XAU biasanya: spread 30 points (3 digit) = $0.30
-    spread_usd = spread_raw * point 
+    # GUARD 2: Real Spread Check (Ask - Bid)
+    real_spread_usd = abs(ask - bid)
+    if real_spread_usd > MAX_SPREAD_USD:
+        return {"signal": "WAIT", "reason": f"High Spread: ${real_spread_usd:.2f}", "setup": {}, "timestamp": None}
+
+    # GUARD 3: Stale Feed (Data Basi)
+    # Cek selisih waktu server MT5 vs waktu sekarang
+    tick_time_msc = int(meta.get("tick_time_msc") or 0)
+    now_ts = time.time()
     
-    if spread_usd > MAX_SPREAD_USD:
-        return {"signal": "WAIT", "reason": f"High Spread: ${spread_usd:.2f}", "setup": {}, "timestamp": timestamp}
+    if tick_time_msc > 0:
+        # Convert msc to seconds
+        lag = now_ts - (tick_time_msc / 1000.0)
+        if lag > 120: # Toleransi 2 menit (kalau VPS lag)
+             return {"signal": "WAIT", "reason": f"Stale Data Lag: {lag:.1f}s", "setup": {}, "timestamp": None}
 
-    # 3. Stale Feed (Data Basi > 2 Menit) - Opsional kalau tick time ada
-    tick_ts = int(tick.get('time', 0) or 0)
-    if tick_ts > 0:
-        now_ts = int(datetime.now(timezone.utc).timestamp())
-        if (now_ts - tick_ts) > 120:
-             return {"signal": "WAIT", "reason": "Stale Data Feed (>2m lag)", "setup": {}, "timestamp": timestamp}
+    # GUARD 4: Broker Chaos (Freeze/Stop Level abnormal)
+    stop_level = int(tick.get("stop_level", 0) or 0)
+    freeze_level = int(tick.get("freeze_level", 0) or 0)
+    if stop_level > 200 or freeze_level > 200: # 200 points = $2.0 range (sangat abnormal)
+        return {"signal": "WAIT", "reason": "Broker Chaos (High Stop/Freeze Level)", "setup": {}, "timestamp": None}
 
-    # --- INDICATOR BLOCK ---
-    # 1. Trend Filter (EMA)
-    ema_50 = ta.ema(df['Close'], length=50).iloc[-1]
-    ema_200 = ta.ema(df['Close'], length=200).iloc[-1]
-    trend = "BULLISH" if ema_50 > ema_200 else "BEARISH"
+
+    # --- ANALYSIS BLOCK ---
+    df_m5 = data['m5'].copy()
+    last = df_m5.iloc[-1]
+    prev = df_m5.iloc[-2]
     
-    # 2. ATR untuk Buffer
-    atr_val = ta.atr(df['High'], df['Low'], df['Close'], length=14).iloc[-1]
-    sweep_buffer = 0.2 * atr_val # Buffer toleransi stop hunt (wick sedikit tembus OB)
+    # 2. TREND FILTER (M15 PRIORITY)
+    # Gunakan M15 untuk arah besar biar gak kegulung chop di M5
+    trend = "NEUTRAL"
+    if 'm15' in data and not data['m15'].empty:
+        df_m15 = data['m15']
+        ema_50 = ta.ema(df_m15['Close'], length=50).iloc[-1]
+        ema_200 = ta.ema(df_m15['Close'], length=200).iloc[-1]
+        trend = "BULLISH" if ema_50 > ema_200 else "BEARISH"
+    else:
+        # Fallback ke M5 kalau M15 belum load
+        ema_50 = ta.ema(df_m5['Close'], length=50).iloc[-1]
+        ema_200 = ta.ema(df_m5['Close'], length=200).iloc[-1]
+        trend = "BULLISH" if ema_50 > ema_200 else "BEARISH"
 
-    # 3. SMC Logic
-    ob_bull, ob_bear = find_quality_ob(df)
+    # 3. ATR BUFFER
+    atr_val = ta.atr(df_m5['High'], df_m5['Low'], df_m5['Close'], length=14).iloc[-1]
+    if pd.isna(atr_val): atr_val = 1.0 # Fallback aman
+    sweep_buffer = 0.2 * atr_val 
+
+    # 4. SMC LOGIC (Execution di M5)
+    ob_bull, ob_bear = find_quality_ob(df_m5)
     
     signal = "WAIT"
     reason = "Scanning..."
     
-    # --- LOGIC BUY ---
+    # LOGIC BUY
     if trend == "BULLISH" and ob_bull:
         ob_low, ob_high = ob_bull
-        # Retest Logic Yang Ketat:
-        # A. Harga Low masuk ke dalam zona (di bawah High OB)
-        touched_zone = last['Low'] <= ob_high
-        # B. Harga Low TIDAK tembus terlalu dalam (di atas Low OB - buffer) -> Valid Rejection, bukan Breakdown
-        held_zone = last['Low'] >= (ob_low - sweep_buffer)
-        # C. Close berhasil tutup DI ATAS zona (Konfirmasi Rejection)
-        rejected_up = last['Close'] > ob_high
+        # Retest Logic:
+        # 1. Low masuk zona atau nyentuh
+        touched = last['Low'] <= ob_high
+        # 2. Low TIDAK tembus parah (di atas Low OB - buffer)
+        held = last['Low'] >= (ob_low - sweep_buffer)
+        # 3. Close mantul ke atas (Rejection)
+        rejected = last['Close'] > ob_high
         
-        if touched_zone and held_zone and rejected_up:
+        if touched and held and rejected:
             signal = "BUY"
-            reason = "SMC: Bullish OB Retest + Clean Rejection"
+            reason = "SMC: Bullish OB Retest + M15 Trend Align"
 
-    # --- LOGIC SELL ---
+    # LOGIC SELL
     if trend == "BEARISH" and ob_bear:
         ob_low, ob_high = ob_bear
-        # Retest Logic:
-        # A. Harga High masuk zona (di atas Low OB)
-        touched_zone = last['High'] >= ob_low
-        # B. Harga High TIDAK tembus atas (di bawah High OB + buffer)
-        held_zone = last['High'] <= (ob_high + sweep_buffer)
-        # C. Close berhasil tutup DI BAWAH zona
-        rejected_down = last['Close'] < ob_low
+        # Retest Logic
+        touched = last['High'] >= ob_low
+        held = last['High'] <= (ob_high + sweep_buffer)
+        rejected = last['Close'] < ob_low
         
-        if touched_zone and held_zone and rejected_down:
+        if touched and held and rejected:
             signal = "SELL"
-            reason = "SMC: Bearish OB Retest + Clean Rejection"
+            reason = "SMC: Bearish OB Retest + M15 Trend Align"
 
     # --- EXECUTION BLOCK (MONEY MANAGEMENT) ---
     setup = {}
+    sl_usd_dist = 0.0
+    tp_usd_dist = 0.0
+
     if signal in ["BUY", "SELL"]:
         # Entry Realtime
         entry_price = ask if signal == "BUY" else bid
@@ -147,12 +165,13 @@ def calculate_rules(data):
             raw_sl_dist = swing_high - entry_price
         
         # CLAMPING JARAK SL ($3.0 - $5.0)
-        # "Jangan kurang dari $3 (kebisingan), Jangan lebih dari $5 (kegedean)"
         final_sl_dist = max(TARGET_SL_MIN_USD, min(raw_sl_dist, TARGET_SL_MAX_USD))
+        sl_usd_dist = final_sl_dist
         
         # Hitung TP dengan Cap Max
         raw_tp_dist = final_sl_dist * RR_RATIO
         final_tp_dist = min(raw_tp_dist, MAX_TP_USD)
+        tp_usd_dist = final_tp_dist
         
         # Hitung Harga Akhir
         if signal == "BUY":
@@ -172,21 +191,19 @@ def calculate_rules(data):
         "signal": signal,
         "reason": reason,
         "setup": setup,
-        "timestamp": timestamp,
+        "timestamp": last.name,
         "meta": {
             "indicators": {
-                "trend": trend,
-                "ema50": ema_50,
-                "atr": atr_val
+                "trend_m15": trend,
+                "atr_m5": atr_val,
+                "ob_status": "Active" if (ob_bull or ob_bear) else "None"
             },
             "risk_audit": {
-                "spread_usd": spread_usd,
-                "sl_dist_usd": final_sl_dist if signal in ["BUY", "SELL"] else 0,
-                "tp_dist_usd": final_tp_dist if signal in ["BUY", "SELL"] else 0
+                "spread_usd": real_spread_usd,
+                "sl_usd": sl_usd_dist,
+                "tp_usd": tp_usd_dist
             },
-            "spread": spread_raw, # Untuk run_bot/AI
-            "price": last['Close'],
-            "dist_pdh_pts": 0,
-            "dist_pdl_pts": 0
+            "spread": real_spread_usd,
+            "price": last['Close']
         }
     }
