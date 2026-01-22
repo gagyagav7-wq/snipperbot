@@ -25,11 +25,15 @@ def ask_ai_judge(signal_type, bot_reason, metrics):
     last_pivot = m15_struct.get('last_pivot', 'N/A')
     dist_to_pivot = m15_struct.get('dist_to_pivot', 0.0)
     leg_sizes = m15_struct.get('leg_sizes_signed', [])
+    
+    # FIX: Ambil Konteks OBS
+    is_obs = m15_struct.get('last_pivot_is_obs', False)
+    pivot_type = m15_struct.get('last_pivot_type', 'None')
 
     warnings = metrics.get('warnings', [])
     warn_str = ", ".join(warnings) if warnings else "None"
 
-    # PROMPT V16: Outside Bar Awareness
+    # PROMPT V17: Liquidity Sweep Logic
     prompt = f"""
     Role: Senior XAUUSD Scalper (SMC & ZigZag Wave Analyst).
     
@@ -39,7 +43,7 @@ def ask_ai_judge(signal_type, bot_reason, metrics):
     
     M15 Structure (ZigZag): {sequence}
     Recent Leg Sizes (+Up/-Down): {leg_sizes} 
-    Last Pivot: {last_pivot} (Note: [OBS] = Outside Bar / Liquidity Sweep)
+    Last Pivot: {last_pivot}
     Distance to Pivot: ${dist_to_pivot:.2f}
     
     System Warnings: {warn_str}
@@ -47,28 +51,28 @@ def ask_ai_judge(signal_type, bot_reason, metrics):
     Task: Validate Trade Context.
     
     RULES:
-    1. TREND ALIGNMENT:
-       - BUY: Structure should imply Higher Lows (HL).
-       - SELL: Structure should imply Lower Highs (LH).
+    1. TREND & WAVE:
+       - BUY: Structure Higher Lows (HL). Legs (+) > Legs (-).
+       - SELL: Structure Lower Highs (LH). Legs (-) > Legs (+).
        
-    2. WAVE MOMENTUM:
-       - BUY: Look for positive legs > negative legs.
-       - SELL: Look for negative legs > positive legs (magnitude).
+    2. LIQUIDITY SWEEP (Outside Bar Logic):
+       - Current Last Pivot is OBS: {is_obs} (Type: {pivot_type})
+       - If Last Pivot is 'Low' & OBS = True -> Bullish Sweep (High prob BUY).
+       - If Last Pivot is 'High' & OBS = True -> Bearish Sweep (High prob SELL).
+       - If Signal BUY but Last Pivot is 'High' OBS -> Warning (Trading into sweep).
        
-    3. OBS / LIQUIDITY SWEEP:
-       - If Last Pivot has [OBS], it means a liquidity sweep happened.
-       - Buying after a Low [OBS] is often high probability (Stop Hunt).
-       - Selling after a High [OBS] is often high probability.
+    3. DON'T CHASE:
+       - Avoid buying right at the top of a large (+) leg.
     
     DECISION:
-    - APPROVE: Structure aligns, momentum supports signal.
-    - REJECT: Fighting structure or Wrong Momentum.
+    - APPROVE: Structure aligns OR Valid Liquidity Sweep (OBS) in signal direction.
+    - REJECT: Fighting structure, bad momentum, or clock drift warning.
     
     Output JSON ONLY:
     {{
       "decision": "APPROVE" or "REJECT",
       "confidence": 0-100,
-      "reason": "Explain structure, momentum & OBS context",
+      "reason": "Explain structure, momentum & OBS sweep",
       "wave_bias": "Impulse/Correction"
     }}
     """
