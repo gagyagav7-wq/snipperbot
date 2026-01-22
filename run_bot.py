@@ -8,6 +8,7 @@ import requests
 import html
 from datetime import datetime
 
+# Import Module Internal
 from src.data_loader import get_market_data
 from src.indicators import calculate_rules
 from src.logger import TradeLogger
@@ -27,7 +28,7 @@ def send_telegram_html(message):
     except: pass
 
 def main():
-    print("="*40 + "\n💀 GOLD KILLER PRO: PLATINUM EDITION 💀\n" + "="*40)
+    print("="*40 + "\n💀 GOLD KILLER PRO: PLATINUM EDITION (V9) 💀\n" + "="*40)
     logger = TradeLogger()
     
     last_candle_ts = None
@@ -81,18 +82,12 @@ def main():
                     if not setup or "entry" not in setup:
                         print("⚠️ Setup incomplete, skipping...")
                     else:
-                        # FIX: Safe Fingerprint (String Fallback)
-                        # Kalau data error, jangan jadi 0_0_0, tapi pakai string aslinya biar unik
+                        # FIX: Safe Fingerprint (String Fallback jika gagal float)
                         try:
-                            e_val = float(setup.get('entry', 0) or 0)
-                            sl_val = float(setup.get('sl', 0) or 0)
-                            tp_val = float(setup.get('tp', 0) or 0)
-                            
-                            e_r = round(e_val, digits)
-                            sl_r = round(sl_val, digits)
-                            tp_r = round(tp_val, digits)
+                            e_r = round(float(setup.get('entry', 0) or 0), digits)
+                            sl_r = round(float(setup.get('sl', 0) or 0), digits)
+                            tp_r = round(float(setup.get('tp', 0) or 0), digits)
                         except:
-                            # Kalau gagal cast, pakai raw string biar fingerprint tetep jalan
                             e_r = str(setup.get('entry', 'err'))
                             sl_r = str(setup.get('sl', 'err'))
                             tp_r = str(setup.get('tp', 'err'))
@@ -103,10 +98,24 @@ def main():
                             last_ai_fingerprint = current_fingerprint 
                             
                             print(f"🤖 AI Judging {signal}...")
+                            
+                            # --- FIX PLUMBING DATA KE AI ---
+                            # Mengambil semua data meta dari indicators.py untuk dikirim ke AI
+                            meta = contract.get("meta", {})
+                            
                             metrics = {
-                                **contract.get("meta", {}).get("indicators", {}),
-                                "spread": contract["meta"].get("spread"),
-                                "price": last_bar["Close"]
+                                # 1. Indikator Utama (Trend, OB, Structure, Pivots)
+                                **meta.get("indicators", {}),
+                                
+                                # 2. Data Plumbing (Warning & Audit VPS)
+                                "warnings": meta.get("warnings", []),
+                                "tick_lag_sec": meta.get("tick_lag_sec", 0),
+                                "tick_lag_sec_raw": meta.get("tick_lag_sec_raw", 0),
+                                
+                                # 3. Risk & Harga
+                                "spread": meta.get("spread", 0),
+                                "risk_audit": meta.get("risk_audit", {}),
+                                "price": meta.get("candle", {}).get("close", 0)
                             }
                             
                             judge = ask_ai_judge(signal, contract["reason"], metrics)
