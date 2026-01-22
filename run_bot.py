@@ -7,6 +7,7 @@ import sys
 import requests
 import html
 import json
+import math
 from datetime import datetime, timezone
 
 # Import Module Internal
@@ -30,61 +31,84 @@ def send_telegram_html(message):
 
 def run_diagnostics():
     """
-    PRE-FLIGHT CHECK: Pastikan Server, Waktu, dan Data sehat sebelum trading.
+    PRE-FLIGHT CHECK V19: FAIL-CLOSED POLICY.
+    Bot menolak nyala jika ada indikasi data busuk atau lag parah.
     """
-    print("\n🕵️ RUNNING PRE-FLIGHT DIAGNOSTICS...")
-    
-    # 1. Cek Koneksi Data
-    print("[1/4] Checking Market Data Feed...", end=" ")
+    print("\n🕵️ RUNNING PRE-FLIGHT DIAGNOSTICS (INSTITUTIONAL GRADE)...")
+
+    # 1. Cek Koneksi & Data Frame
+    print("[1/5] Checking Market Data Feed...", end=" ")
     data = get_market_data()
     if not data or 'm5' not in data or data['m5'].empty:
-        print("❌ FAILED! (No Data)")
+        print("❌ FAILED! (No Data / Empty DataFrame)")
         return False
     print(f"✅ OK ({len(data['m5'])} candles)")
 
-    # 2. Cek Time Sync (Vital buat Scalping)
-    print("[2/4] Checking Server Time Sync...", end=" ")
-    meta = data.get('meta', {})
-    tick_msc = int(meta.get("tick_time_msc") or 0)
+    # 2. Cek Integritas Tick (Bid/Ask Real)
+    print("[2/5] Checking Tick Integrity...", end=" ")
+    tick = data.get("tick", {})
+    bid = float(tick.get("bid", 0) or 0)
+    ask = float(tick.get("ask", 0) or 0)
     
-    if tick_msc == 0:
-        print("❌ FAILED! (No Tick Timestamp)")
+    if bid <= 0 or ask <= 0:
+        print(f"❌ FAILED! (Invalid Price: Bid={bid}, Ask={ask}. Market Closed?)")
         return False
         
-    server_ts = tick_msc / 1000.0
-    local_ts = time.time()
-    lag = local_ts - server_ts
-    
-    print(f"✅ OK (Lag: {lag:.3f}s)")
-    if abs(lag) > 2.0:
-        print(f"⚠️ WARNING: High Lag detected ({lag:.3f}s). Check VPS Clock!")
+    spread = abs(ask - bid)
+    print(f"✅ OK (Bid={bid}, Ask={ask}, Spread={spread:.3f})")
 
-    # 3. Cek USD Unit Consistency (Harga Emas)
-    print("[3/4] Checking Price Unit...", end=" ")
-    last_close = data['m5']['Close'].iloc[-1]
+    # 3. Cek Time Sync (CRITICAL FAIL-SAFE)
+    print("[3/5] Checking Server Time Sync...", end=" ")
+    meta = data.get('meta', {})
+    tick_msc = int(meta.get("tick_time_msc") or 0)
+    tick_sec = int(meta.get("tick_time") or 0)
+
+    # Prioritas MSC, fallback ke SEC
+    broker_ts = (tick_msc / 1000.0) if tick_msc > 0 else (float(tick_sec) if tick_sec > 0 else 0)
+    
+    if broker_ts <= 0:
+        print("❌ FAILED! (No Broker Timestamp found)")
+        return False
+
+    lag = time.time() - broker_ts
+    print(f"✅ Data Age: {lag:.3f}s")
+
+    # HARD RULES (Sesuai Indicators V17)
+    if lag < -10:
+        print(f"⛔ FATAL ERROR: Severe Clock Drift ({lag:.3f}s). VPS time is ahead of Broker!")
+        return False
+    if lag > 8:
+        print(f"⛔ FATAL ERROR: Critical Lag ({lag:.3f}s). Connection is too slow for scalping.")
+        return False
+    if abs(lag) > 2:
+        print(f"⚠️ WARNING: Noticeable Lag ({lag:.3f}s). Scalping might be risky.")
+
+    # 4. Cek Kewarasan Harga (Unit Check)
+    print("[4/5] Checking Price Unit...", end=" ")
+    last_close = float(data['m5']['Close'].iloc[-1])
     if last_close < 100 or last_close > 5000:
-        print(f"⚠️ WARNING: Price {last_close} seems weird for XAUUSD. Check Symbol!")
+        print(f"⚠️ WARNING: Price {last_close} seems weird for XAUUSD. Check Symbol Mapping!")
     else:
         print(f"✅ OK (Price: {last_close})")
 
-    # 4. AI Config Check
-    print("[4/4] Checking AI Configuration...", end=" ")
+    # 5. Cek Kunci AI
+    print("[5/5] Checking AI Configuration...", end=" ")
     key = os.getenv("GEMINI_API_KEY")
     if not key:
-        print("❌ FAILED! (No API Key)")
+        print("❌ FAILED! (No API Key found in .env)")
         return False
     print("✅ OK")
 
     print("\n🚀 SYSTEMS GO. STARTING ENGINE...\n")
-    time.sleep(2)
+    time.sleep(1)
     return True
 
 def main():
-    print("="*40 + "\n💀 GOLD KILLER PRO: PLATINUM (V18 SEALED) 💀\n" + "="*40)
+    print("="*40 + "\n💀 GOLD KILLER PRO: PLATINUM (V19 FINAL) 💀\n" + "="*40)
     
-    # JALANKAN DIAGNOSTIK DULU
+    # WAJIB LOLOS DIAGNOSTIK
     if not run_diagnostics():
-        print("⛔ STARTUP ABORTED DUE TO SYSTEM FAILURE.")
+        print("⛔ STARTUP ABORTED. FIX THE ERRORS ABOVE.")
         return
 
     logger = TradeLogger()
@@ -92,6 +116,9 @@ def main():
     last_candle_ts = None
     last_logged_ts = None
     last_ai_fingerprint = None
+    
+    # Runtime Lag Alert Limiter (biar gak spam telegram)
+    last_lag_alert_ts = 0 
 
     while True:
         try:
@@ -104,14 +131,22 @@ def main():
             last_bar = df_5m.iloc[-1]
             ts = last_bar.name
             
-            # UTC Safe Check
             if getattr(ts, "tzinfo", None) is None: ts = ts.tz_localize("UTC")
             current_ts = int(ts.timestamp())
 
             tick = data.get("tick", {})
-            bid = tick.get("bid", 0.0)
-            ask = tick.get("ask", 0.0)
-            digits = int(tick.get("digits", 2)) 
+            bid = float(tick.get("bid", 0) or 0)
+            ask = float(tick.get("ask", 0) or 0)
+            
+            # FIX: Auto-Detect Digits dari Point (Matematis)
+            point = float(tick.get("point", 0.01) or 0.01)
+            raw_digits = tick.get("digits")
+            if raw_digits is not None:
+                digits = int(raw_digits)
+            else:
+                # Kalau broker gak kasih digits, hitung dari log10 point
+                # Contoh: point 0.01 -> log10(-2) -> 2 digits
+                digits = max(0, int(round(-math.log10(point))))
 
             # --- 1. STATUS CHECK ---
             status = check_signal_status(last_bar['High'], last_bar['Low'], bid, ask)
@@ -124,15 +159,22 @@ def main():
                 status = "NONE" 
                 print(f"✅ State Cleared: {finished}")
 
-            # --- 2. CANDLE GATE ---
+            # --- 2. CANDLE GATE & LOGIC ---
             if current_ts != last_candle_ts:
                 contract = calculate_rules(data)
                 
-                # --- DEBUG PRINT (Buat Audit Log Realtime) ---
-                # Print status tiap candle baru biar lu tau bot hidup
+                # Runtime Critical Lag Alert (Via Telegram)
+                # Indikator V17 akan return reason "Critical Lag..." jika lag > 8s
+                if "Critical Lag" in contract["reason"]:
+                    now = time.time()
+                    if now - last_lag_alert_ts > 300: # Alert max tiap 5 menit
+                        send_telegram_html(f"⚠️ <b>CRITICAL LAG WARNING</b>\nBot paused due to connection instability.\nReason: {contract['reason']}")
+                        last_lag_alert_ts = now
+
+                # Debug Print
                 obs_status = "Wait"
                 if contract["signal"] != "WAIT": obs_status = f"SIGNAL {contract['signal']}"
-                print(f"[{datetime.now().strftime('%H:%M:%S')}] Candle Close: {last_bar['Close']} | {obs_status} | Reason: {contract['reason']}")
+                print(f"[{datetime.now().strftime('%H:%M:%S')}] P:{last_bar['Close']} | {obs_status} | {contract['reason']}")
 
                 if current_ts != last_logged_ts:
                     logger.log_contract(contract)
@@ -146,26 +188,22 @@ def main():
                     if not setup or "entry" not in setup:
                         print("⚠️ Setup incomplete, skipping...")
                     else:
-                        # FIX: Safe Fingerprint
+                        # Safe Fingerprint
                         try:
                             e_r = round(float(setup.get('entry', 0) or 0), digits)
                             sl_r = round(float(setup.get('sl', 0) or 0), digits)
                             tp_r = round(float(setup.get('tp', 0) or 0), digits)
                         except:
-                            e_r = str(setup.get('entry', 'err'))
-                            sl_r = str(setup.get('sl', 'err'))
-                            tp_r = str(setup.get('tp', 'err'))
+                            e_r, sl_r, tp_r = "ERR", "ERR", "ERR"
 
                         current_fingerprint = f"{current_ts}_{signal}_{e_r}_{sl_r}_{tp_r}"
                         
                         if current_fingerprint != last_ai_fingerprint:
                             last_ai_fingerprint = current_fingerprint 
-                            
                             print(f"🤖 AI Judging {signal}...")
                             
-                            # --- FIX PLUMBING (V18 VERIFIED) ---
+                            # Plumbing Data V18/V19
                             meta = contract.get("meta", {})
-                            
                             metrics = {
                                 **meta.get("indicators", {}),
                                 "warnings": meta.get("warnings", []),
@@ -176,9 +214,6 @@ def main():
                                 "price": meta.get("candle", {}).get("close", 0)
                             }
                             
-                            # DEBUG: DUMP METRICS UNTUK AUDIT (Opsional, print di console)
-                            # print(json.dumps(metrics, indent=2, default=str))
-
                             judge = ask_ai_judge(signal, contract["reason"], metrics)
                             decision = str(judge.get("decision", "REJECT")).strip().upper()
                             
