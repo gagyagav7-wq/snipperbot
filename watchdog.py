@@ -3,7 +3,6 @@ import os
 import subprocess
 import requests
 import sys
-
 from dotenv import load_dotenv
 
 # --- CONFIG ---
@@ -27,23 +26,38 @@ def alert(msg):
 
 def is_bot_running():
     try:
-        # Cek spesifik ke file run_bot.py biar gak salah kill process lain
         output = subprocess.check_output(["pgrep", "-f", "python.*run_bot.py"])
         return bool(output.strip())
     except subprocess.CalledProcessError:
         return False
 
 def kill_zombies():
-    """Membunuh sisa-sisa bot yang nge-hang sebelum restart"""
+    """Smart Terminator: Sopan dulu, baru kasar."""
     try:
-        # Pkill force (-9) ke semua yang mengandung run_bot.py
-        subprocess.run(["pkill", "-9", "-f", "python.*run_bot.py"], check=False)
-        time.sleep(2) # Kasih waktu buat OS bersih-bersih
-    except: pass
+        # Coba ambil PID
+        pids = subprocess.check_output(["pgrep", "-f", "python.*run_bot.py"]).decode().split()
+        
+        if not pids: return
+
+        # Tahap 1: SIGTERM (Kasih kesempatan cleanup)
+        for pid in pids:
+            subprocess.run(["kill", "-TERM", pid], check=False)
+        time.sleep(3) # Tunggu 3 detik
+
+        # Tahap 2: Cek sisa & SIGKILL (Paksa mati)
+        pids_left = subprocess.check_output(["pgrep", "-f", "python.*run_bot.py"]).decode().split()
+        if pids_left:
+            for pid in pids_left:
+                subprocess.run(["kill", "-KILL", pid], check=False)
+            time.sleep(1)
+            
+    except subprocess.CalledProcessError:
+        pass # Aman, berarti sudah tidak ada proses
+    except Exception as e:
+        print(f"⚠️ Kill Error: {e}")
 
 def restart_bot():
-    """Restart dengan Kill Switch & VENV Safe"""
-    kill_zombies() # WAJIB KILL DULU
+    kill_zombies() # Bersihkan dulu
     
     log_file = os.path.join(LOG_DIR, "restart.log")
     try:
@@ -56,12 +70,9 @@ def restart_bot():
                 stderr=f
             )
         
-        # --- VERIFY WINDOW (Cek apakah beneran nyala?) ---
-        time.sleep(10)
-        if is_bot_running():
-            return True
-        else:
-            return False
+        time.sleep(10) # Verify window
+        if is_bot_running(): return True
+        return False
             
     except Exception as e:
         alert(f"🚨 <b>RESTART FAILED:</b> {str(e)}")
@@ -69,7 +80,7 @@ def restart_bot():
 
 # --- MAIN LOOP ---
 print(f"🐕 WATCHDOG GUARDING: {PROJECT_DIR}")
-alert("🐕 <b>WATCHDOG STARTED</b>\nSystem: Terminator Mode (Anti-Ghost)")
+alert("🐕 <b>WATCHDOG STARTED</b>\nSystem: Smart Terminator Mode")
 
 error_count = 0
 last_alert_ts = 0
@@ -81,24 +92,22 @@ while True:
         print(f"🚨 BOT DOWN! Attempt {error_count}/3")
         
         if error_count <= 3:
-            alert(f"⚠️ <b>BOT CRASHED</b> (x{error_count})\nKilling zombies & restarting...")
-            
+            alert(f"⚠️ <b>BOT CRASHED</b> (x{error_count})\nRestarting...")
             if restart_bot():
-                alert("✅ <b>RESTART SUCCESS</b>\nBot is back online.")
-                # Jangan reset error_count langsung, tunggu stable dulu di loop berikutnya
+                alert("✅ <b>RESTART SUCCESS</b>")
             else:
-                alert("❌ <b>RESTART STALLED</b>\nBot failed to launch.")
+                alert("❌ <b>RESTART STALLED</b>")
         else:
-            # Spam admin kalau udah 3x gagal total
-            if time.time() - last_alert_ts > 60: # Spam tiap menit
-                alert(f"🚨 <b>CRITICAL FAILURE</b>\nAuto-restart failed 3 times.\nServer requires MANUAL intervention!")
+            if time.time() - last_alert_ts > 60:
+                alert(f"🚨 <b>CRITICAL FAILURE</b>\nManual check required!")
                 last_alert_ts = time.time()
-            
-            time.sleep(60) # Tidur sebentar
+            time.sleep(60)
             
     else:
-        # Bot jalan normal
         if error_count > 0:
-            error_count = 0 # Reset counter kalau stabil
+            if time.time() - last_alert_ts > ALERT_COOLDOWN:
+                alert("✅ <b>BOT RECOVERED</b>")
+                last_alert_ts = time.time()
+            error_count = 0 
             
     time.sleep(60)
