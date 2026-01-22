@@ -5,13 +5,14 @@ import time
 from datetime import datetime, timezone
 
 # --- KONFIGURASI SCALPER (USD ABSOLUTE) ---
-TARGET_SL_MIN_USD = 3.0  # SL $3
-TARGET_SL_MAX_USD = 5.0  # SL $5
-MAX_SPREAD_USD    = 0.50 # Spread max $0.50
+TARGET_SL_MIN_USD = 3.0  # Min SL $3
+TARGET_SL_MAX_USD = 5.0  # Max SL $5
+MAX_SPREAD_USD    = 0.50 # Hard Cap Spread
 RR_RATIO          = 1.2  
 MAX_TP_USD        = 8.0  
 
 def find_quality_ob(df):
+    """Mencari Order Block Valid dengan Displacement yang Adil"""
     if len(df) < 100: return None, None
     subset = df.tail(100).copy()
     atr = ta.atr(subset['High'], subset['Low'], subset['Close'], length=14)
@@ -21,35 +22,46 @@ def find_quality_ob(df):
     ob_bear = None
     
     for i in range(len(subset)-4, 0, -1):
-        current_atr = subset['ATR'].iloc[i]
-        if pd.isna(current_atr) or current_atr <= 0: continue
+        # FIX: Bandingkan body candle impulse (i+1) dengan ATR saat itu (i+1)
+        # Biar fair, apakah candle itu beneran gede dibanding volatilitas saat itu
+        atr_next = subset['ATR'].iloc[i+1]
+        if pd.isna(atr_next) or atr_next <= 0: continue
         
+        # BULLISH OB
         if subset['Close'].iloc[i] < subset['Open'].iloc[i]: 
             body_next = abs(subset['Close'].iloc[i+1] - subset['Open'].iloc[i+1])
-            if subset['Close'].iloc[i+1] > subset['Open'].iloc[i+1] and body_next > (current_atr * 0.8):
+            if subset['Close'].iloc[i+1] > subset['Open'].iloc[i+1] and body_next > (atr_next * 0.8):
                 ob_bull = (subset['Low'].iloc[i], subset['High'].iloc[i]) 
                 break 
 
     for i in range(len(subset)-4, 0, -1):
-        current_atr = subset['ATR'].iloc[i]
-        if pd.isna(current_atr) or current_atr <= 0: continue
+        atr_next = subset['ATR'].iloc[i+1]
+        if pd.isna(atr_next) or atr_next <= 0: continue
 
+        # BEARISH OB
         if subset['Close'].iloc[i] > subset['Open'].iloc[i]:
             body_next = abs(subset['Close'].iloc[i+1] - subset['Open'].iloc[i+1])
-            if subset['Close'].iloc[i+1] < subset['Open'].iloc[i+1] and body_next > (current_atr * 0.8):
+            if subset['Close'].iloc[i+1] < subset['Open'].iloc[i+1] and body_next > (atr_next * 0.8):
                 ob_bear = (subset['Low'].iloc[i], subset['High'].iloc[i])
                 break
 
     return ob_bull, ob_bear
 
 def get_swing_structure(df):
-    """Cari Swing High/Low M15 buat konteks Elliott Wave"""
-    # Simple Pivot High/Low (length 5 kiri kanan)
-    # Ini berat kalau pakai pandas_ta pivot, kita pake rolling max/min aja yang cepet
-    # atau ambil High/Low absolut 20 candle terakhir
-    recent_high = df['High'].tail(20).max()
-    recent_low = df['Low'].tail(20).min()
-    return recent_high, recent_low
+    """
+    Analisa Struktur M15: High/Low 20 candle terakhir & Posisi Relatif
+    Output 'pos' (0.0 - 1.0): 
+    - 1.0 = Harga di Pucuk High (Bahaya Buy)
+    - 0.0 = Harga di Dasar Low (Bahaya Sell)
+    """
+    recent_high = float(df['High'].tail(20).max())
+    recent_low  = float(df['Low'].tail(20).min())
+    current_close = float(df['Close'].iloc[-1])
+    
+    rng = max(1e-9, recent_high - recent_low) # Anti div by zero
+    pos = (current_close - recent_low) / rng
+    
+    return recent_high, recent_low, pos
 
 def calculate_rules(data):
     # 1. PREP DATA
@@ -67,21 +79,23 @@ def calculate_rules(data):
     prev = df_m5.iloc[-2]
     timestamp = last.name
 
-    # --- GUARD BLOCK (LEVEL: BANK GRADE) ---
+    # --- GUARD BLOCK (AUDITED) ---
     
-    # 1. Market Closed
+    # 1. Market Closed / Tick Error
     if bid <= 0 or ask <= 0:
         return {"signal": "WAIT", "reason": "Invalid Tick", "setup": {}, "timestamp": timestamp}
 
-    # 2. Spread Guard (USD)
-    point = float(tick.get('point', 0.01) or 0.01)
-    spread_raw = float(tick.get('spread', 0) or 0)
-    real_spread_usd = abs(ask - bid) # Pake Ask-Bid lebih jujur
-    
+    # 2. Spread Guard (Cost Ratio)
+    real_spread_usd = abs(ask - bid)
+    # Hard Cap $0.50
     if real_spread_usd > MAX_SPREAD_USD:
         return {"signal": "WAIT", "reason": f"High Spread: ${real_spread_usd:.2f}", "setup": {}, "timestamp": timestamp}
+    # Ratio Cap: Spread tidak boleh > 15% dari Min SL ($3)
+    # Kalau spread $0.45 tapi kita mau scalping SL $3, spread makan profit gede banget.
+    if real_spread_usd > (TARGET_SL_MIN_USD * 0.15):
+        return {"signal": "WAIT", "reason": "Spread Ratio too High", "setup": {}, "timestamp": timestamp}
 
-    # 3. Stale Feed (Data Basi - Scalper Threshold: 15s)
+    # 3. Stale Feed & Clock Drift Guard
     tick_msc = int(meta.get("tick_time_msc") or 0)
     tick_sec = int(meta.get("tick_time") or 0)
     
@@ -91,32 +105,34 @@ def calculate_rules(data):
     
     if broker_ts:
         lag = time.time() - broker_ts
-        if lag > 15: # 15 Detik toleransi maksimal buat scalping
-            return {"signal": "WAIT", "reason": f"Stale Feed: {lag:.1f}s Lag", "setup": {}, "timestamp": timestamp}
+        # FIX: Clock Drift (Lag Negatif)
+        if lag < -2: 
+             return {"signal": "WAIT", "reason": f"Clock Drift: {lag:.1f}s", "setup": {}, "timestamp": timestamp}
+        
+        lag = max(0.0, lag)
+        if lag > 15: 
+             return {"signal": "WAIT", "reason": f"Stale Feed: {lag:.1f}s Lag", "setup": {}, "timestamp": timestamp}
     else:
-        # Kalau gak ada timestamp broker sama sekali, bahaya
         return {"signal": "WAIT", "reason": "No Broker Timestamp", "setup": {}, "timestamp": timestamp}
 
-    # 4. Broker Chaos (USD Based)
+    # 4. Broker Chaos
     stop_lvl = int(tick.get("stop_level", 0) or 0)
     frz_lvl = int(tick.get("freeze_level", 0) or 0)
+    point = float(tick.get('point', 0.01) or 0.01)
     
     stop_usd = stop_lvl * point
     frz_usd = frz_lvl * point
-    
-    if stop_usd > 2.0 or frz_usd > 2.0: # $2 limit abnormal
-        return {"signal": "WAIT", "reason": f"Broker Chaos (StopLvl ${stop_usd:.1f})", "setup": {}, "timestamp": timestamp}
+    if stop_usd > 2.0 or frz_usd > 2.0:
+        return {"signal": "WAIT", "reason": "Broker Chaos", "setup": {}, "timestamp": timestamp}
 
-    # --- INDICATOR ANALYSIS ---
+    # --- ANALYSIS BLOCK ---
     
     # 1. TREND FILTER (M15)
     trend = "NEUTRAL"
-    m15_high, m15_low = 0, 0
+    m15_high, m15_low, m15_pos = 0, 0, 0.5
     
     if 'm15' in data and not data['m15'].empty:
         df_m15 = data['m15']
-        
-        # Guard Warmup M15
         if len(df_m15) < 220:
              return {"signal": "WAIT", "reason": "M15 Warming Up", "setup": {}, "timestamp": timestamp}
              
@@ -127,20 +143,14 @@ def calculate_rules(data):
             return {"signal": "WAIT", "reason": "M15 EMA NaN", "setup": {}, "timestamp": timestamp}
             
         trend = "BULLISH" if ema_50 > ema_200 else "BEARISH"
-        
-        # Ambil Swing M15 buat AI (Elliott Wave Context)
-        m15_high, m15_low = get_swing_structure(df_m15)
+        m15_high, m15_low, m15_pos = get_swing_structure(df_m15)
     else:
-        # Fallback (Jangan entry kalau M15 mati)
         return {"signal": "WAIT", "reason": "M15 Data Missing", "setup": {}, "timestamp": timestamp}
 
-    # 2. ATR & BUFFER (M5)
+    # 2. ATR BUFFER
     atr_val = ta.atr(df_m5['High'], df_m5['Low'], df_m5['Close'], length=14).iloc[-1]
-    
-    # Guard ATR NaN
     if pd.isna(atr_val) or atr_val <= 0:
-        return {"signal": "WAIT", "reason": "ATR Warming Up", "setup": {}, "timestamp": timestamp}
-        
+        return {"signal": "WAIT", "reason": "ATR NaN", "setup": {}, "timestamp": timestamp}
     sweep_buffer = 0.2 * atr_val 
 
     # 3. SMC LOGIC
@@ -171,7 +181,7 @@ def calculate_rules(data):
             signal = "SELL"
             reason = "SMC: Bearish OB Retest + M15 Align"
 
-    # --- EXECUTION & META EXPORT ---
+    # --- EXECUTION & MONEY MANAGEMENT ---
     setup = {}
     sl_usd_dist = 0.0
     tp_usd_dist = 0.0
@@ -179,6 +189,7 @@ def calculate_rules(data):
     if signal in ["BUY", "SELL"]:
         entry_price = ask if signal == "BUY" else bid
         
+        # Hitung Jarak Swing Mentah
         if signal == "BUY":
             swing_low = min(last['Low'], prev['Low'])
             raw_sl_dist = entry_price - swing_low
@@ -186,10 +197,17 @@ def calculate_rules(data):
             swing_high = max(last['High'], prev['High'])
             raw_sl_dist = swing_high - entry_price
         
-        # CLAMP SL ($3 - $5)
-        final_sl_dist = max(TARGET_SL_MIN_USD, min(raw_sl_dist, TARGET_SL_MAX_USD))
+        # FIX: JANGAN PAKSA (Safety First)
+        # Kalau struktur swing butuh SL > $5, berarti bukan setup scalping M5. SKIP!
+        if raw_sl_dist > TARGET_SL_MAX_USD:
+             return {"signal": "WAIT", "reason": f"Structure too wide (${raw_sl_dist:.2f})", "setup": {}, "timestamp": timestamp}
+
+        # Kalau struktur < $3 (terlalu sempit/noise), baru kita paksa lebarkan jadi $3
+        final_sl_dist = max(TARGET_SL_MIN_USD, raw_sl_dist)
+        
         sl_usd_dist = final_sl_dist
         
+        # Hitung TP
         raw_tp_dist = final_sl_dist * RR_RATIO
         final_tp_dist = min(raw_tp_dist, MAX_TP_USD)
         tp_usd_dist = final_tp_dist
@@ -207,16 +225,17 @@ def calculate_rules(data):
             "tp": tp_price
         }
 
-    # Meta untuk Logger & AI
+    # Meta Export Lengkap
     export_meta = {
         "indicators": {
             "trend_m15": trend,
             "atr_m5": atr_val,
             "ob_status": "Active" if (ob_bull or ob_bear) else "None",
-            # Kirim struktur M15 ke AI biar bisa baca Elliott Wave
+            # Kirim POSISI M15 ke AI
             "m15_structure": {
                 "recent_high": m15_high,
                 "recent_low": m15_low,
+                "relative_pos": m15_pos, # 0.0 (Low) - 1.0 (High)
                 "current_price": last['Close']
             }
         },
@@ -226,14 +245,12 @@ def calculate_rules(data):
             "tp_usd": tp_usd_dist
         },
         "spread": real_spread_usd,
-        # Candle Snapshot buat Logger
         "candle": {
             "close": float(last['Close']),
             "high": float(last['High']),
             "low": float(last['Low']),
             "time": str(timestamp)
         },
-        # Forward Times
         "tick_time_msc": tick_msc,
         "tick_time": tick_sec,
         "server_time": meta.get("server_time")
