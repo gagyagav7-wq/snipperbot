@@ -17,6 +17,9 @@ from src.logger import TradeLogger
 from src.state_manager import check_signal_status, save_state_atomic
 from src.ai_engine import ask_ai_judge
 
+# --- KONSTANTA SAFETY ---
+MAX_CANDLE_AGE_SEC = 480 # Toleransi Data Macet (8 Menit utk M5)
+
 def send_telegram_html(message):
     token = os.getenv("TELEGRAM_TOKEN")
     chat_id = os.getenv("TELEGRAM_CHAT_ID")
@@ -29,11 +32,20 @@ def send_telegram_html(message):
         )
     except: pass
 
+def get_broker_timestamp(meta):
+    """Helper Konsisten untuk Ambil Jam Broker"""
+    tick_msc = int(meta.get("tick_time_msc") or 0)
+    tick_sec = int(meta.get("tick_time") or 0)
+    # Prioritas MSC karena lebih presisi
+    if tick_msc > 0: return tick_msc / 1000.0
+    if tick_sec > 0: return float(tick_sec)
+    return 0.0
+
 def run_diagnostics():
     """
-    PRE-FLIGHT CHECK V21.1a: ROBUST DUMMY & STRICT CHECKS.
+    PRE-FLIGHT CHECK V21.1b: CONSISTENT THRESHOLDS & DUAL PING.
     """
-    print("\n🕵️ RUNNING PRE-FLIGHT DIAGNOSTICS (V21.1a TITANIUM)...")
+    print("\n🕵️ RUNNING PRE-FLIGHT DIAGNOSTICS (V21.1b DIAMOND-PLATED)...")
 
     # 1. Cek Data Feed
     print("[1/7] Checking Market Data Feed...", end=" ")
@@ -46,9 +58,7 @@ def run_diagnostics():
     # 2. Cek Server Time Sync
     print("[2/7] Checking Server Time Sync...", end=" ")
     meta = data.get('meta', {})
-    tick_msc = int(meta.get("tick_time_msc") or 0)
-    tick_sec = int(meta.get("tick_time") or 0)
-    broker_ts = (tick_msc / 1000.0) if tick_msc > 0 else (float(tick_sec) if tick_sec > 0 else 0)
+    broker_ts = get_broker_timestamp(meta)
     
     if broker_ts <= 0:
         print("❌ FAILED! (No Broker Timestamp)")
@@ -75,10 +85,11 @@ def run_diagnostics():
     
     candle_gap = broker_ts - last_candle_ts.timestamp()
     
-    if candle_gap > 600: 
+    # FIX: Threshold Konsisten (480s)
+    if candle_gap > MAX_CANDLE_AGE_SEC: 
         print(f"❌ FAILED! Candle vs Broker Gap too big ({candle_gap:.0f}s). Feed Stuck?")
         return False
-    elif candle_gap < -600:
+    elif candle_gap < -MAX_CANDLE_AGE_SEC:
         print(f"❌ FAILED! Candle from future? Gap: {candle_gap:.0f}s.")
         return False
     print(f"✅ OK (Gap: {candle_gap:.0f}s)")
@@ -114,9 +125,8 @@ def run_diagnostics():
         return False
     print("✅ OK")
 
-    # 7. AI LIVE PING (Robust Dummy Metric)
-    print("[7/7] Pinging AI Brain...", end=" ")
-    # FIX: Dummy metrics lengkap biar AI Engine gak error parsing
+    # 7. AI DUAL PING (BUY & SELL Check)
+    print("[7/7] Pinging AI Brain (Dual Check)...", end=" ")
     dummy_metrics = {
         "trend_m15": "NEUTRAL", 
         "price": last_close, 
@@ -130,25 +140,26 @@ def run_diagnostics():
             "last_pivot_type": "Low",
         }
     }
-    try:
-        response = ask_ai_judge("BUY", "SYSTEM_DIAGNOSTIC", dummy_metrics)
-        decision = str(response.get("decision", "")).upper()
-        
-        if decision in ["APPROVE", "REJECT"]:
-            print("✅ ALIVE & VALID")
-        else:
-            print(f"❌ FAILED! (Invalid Decision: {decision})")
+    
+    # FIX: Loop ping untuk BUY dan SELL biar logic AI teruji semua
+    for sig_type in ["BUY", "SELL"]:
+        try:
+            response = ask_ai_judge(sig_type, "SYSTEM_DIAGNOSTIC", dummy_metrics)
+            decision = str(response.get("decision", "")).upper()
+            if decision not in ["APPROVE", "REJECT"]:
+                print(f"❌ FAILED on {sig_type}! (Invalid: {decision})")
+                return False
+        except Exception as e:
+            print(f"❌ FAILED on {sig_type}! (Error: {e})")
             return False
-    except Exception as e:
-        print(f"❌ FAILED! (Connection Error: {e})")
-        return False
-
+            
+    print("✅ ALIVE & VALID")
     print("\n🚀 SYSTEMS GO. STARTING ENGINE...\n")
     time.sleep(1)
     return True
 
 def main():
-    print("="*40 + "\n💀 GOLD KILLER PRO: V21.1a (TITANIUM) 💀\n" + "="*40)
+    print("="*40 + "\n💀 GOLD KILLER PRO: V21.1b (DIAMOND-PLATED) 💀\n" + "="*40)
     
     if not run_diagnostics():
         msg = "⛔ <b>STARTUP ABORTED</b>\nPre-flight diagnostics failed. Check terminal."
@@ -156,7 +167,7 @@ def main():
         send_telegram_html(msg)
         return
 
-    send_telegram_html("🚀 <b>SYSTEM STARTED (V21.1a)</b>\nAll Systems Green. Trading Active.")
+    send_telegram_html("🚀 <b>SYSTEM STARTED (V21.1b)</b>\nAll Systems Green. Trading Active.")
 
     logger = TradeLogger()
     
@@ -177,32 +188,28 @@ def main():
             last_bar = df_5m.iloc[-1]
             ts = last_bar.name
             
-            if getattr(ts, "tzinfo", None) is None: 
-                ts = ts.tz_localize("UTC")
-            else:
-                ts = ts.tz_convert("UTC")
+            if getattr(ts, "tzinfo", None) is None: ts = ts.tz_localize("UTC")
+            else: ts = ts.tz_convert("UTC")
             
             current_ts = int(ts.timestamp())
 
-            # Extract Meta for Time Source
+            # Consistent Broker Time
             meta = data.get('meta', {})
-            tick_msc = int(meta.get("tick_time_msc") or 0)
-            tick_sec = int(meta.get("tick_time") or 0)
-            broker_ts = (tick_msc / 1000.0) if tick_msc > 0 else (float(tick_sec) if tick_sec > 0 else 0)
+            broker_ts = get_broker_timestamp(meta)
             
-            # FIX: Fail-Closed jika Broker Time Hilang (Jangan fallback ke VPS Time)
+            # FIX: Fail-Closed jika Broker Time Hilang
             if broker_ts <= 0:
                 now = time.time()
                 if now - last_lag_alert_ts > 300:
                     send_telegram_html("⚠️ <b>NO BROKER TIME</b>\nmeta.tick_time missing. Bot paused logic.")
                     last_lag_alert_ts = now
                 time.sleep(5)
-                continue # Skip loop
+                continue
 
-            # FIX: Runtime Candle Freshness + Future Guard
+            # FIX: Runtime Candle Freshness (Consistent Threshold)
             candle_age = broker_ts - current_ts
             
-            if candle_age > 480: # Macet > 8 menit
+            if candle_age > MAX_CANDLE_AGE_SEC: 
                 now = time.time()
                 if now - last_freeze_alert_ts > 600: 
                     msg = f"⚠️ <b>DATA FREEZE</b>\nCandle stuck for {candle_age:.0f}s. Check API."
@@ -211,7 +218,7 @@ def main():
                     last_freeze_alert_ts = now
                 time.sleep(10)
                 continue
-            elif candle_age < -480: # Masa Depan > 8 menit (Timezone Error)
+            elif candle_age < -MAX_CANDLE_AGE_SEC:
                 now = time.time()
                 if now - last_freeze_alert_ts > 600:
                     msg = f"⚠️ <b>TIMEZONE MISMATCH</b>\nCandle is from future. Gap: {candle_age:.0f}s"
@@ -250,7 +257,7 @@ def main():
             if current_ts != last_candle_ts:
                 contract = calculate_rules(data)
                 
-                # Critical Lag Guard (Reason based)
+                # Critical Lag Guard
                 is_critical = "Critical Lag" in contract["reason"] or "Severe Clock Drift" in contract["reason"]
                 if is_critical:
                     now = time.time()
