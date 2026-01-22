@@ -2,7 +2,7 @@ import pandas as pd
 import pandas_ta as ta
 import numpy as np
 import time
-from datetime import datetime, timezone
+from datetime import datetime, time as dt_time, timezone
 
 # --- KONFIGURASI SCALPER (USD ABSOLUTE) ---
 TARGET_SL_MIN_USD = 3.0  
@@ -10,6 +10,12 @@ TARGET_SL_MAX_USD = 5.0
 MAX_SPREAD_USD    = 0.50 
 RR_RATIO          = 1.2  
 MAX_TP_USD        = 8.0  
+
+# SESSION FILTER (UTC HOURS)
+# London Open ~07:00 UTC | NY Close ~21:00 UTC
+# Kita main aman: 07:00 UTC s/d 20:00 UTC (14:00 - 03:00 WIB)
+SESSION_START_UTC = 7
+SESSION_END_UTC   = 20
 
 def find_quality_ob(df):
     if len(df) < 100: return None, None
@@ -46,13 +52,12 @@ def find_quality_ob(df):
 
 def get_market_structure(df, point=0.01, window=5):
     """
-    Ekstrak Struktur Pivot dengan Sequence String & Dynamic Epsilon.
-    Output: (List of Dicts, Sequence String)
+    Ekstrak Struktur Pivot Kronologis dengan Sequence String.
     """
     if len(df) < (window * 2 + 10): return [], "Insufficient Data"
     
     pivots = []
-    # FIX: Epsilon Dinamis (2x Point Broker) buat anti-noise
+    # Dynamic Epsilon (Anti-Spam)
     eps = point * 2.0 
     
     for i in range(window, len(df) - window):
@@ -75,7 +80,8 @@ def get_market_structure(df, point=0.01, window=5):
                 "price": float(curr_low), "time": str(df.index[i])
             })
     
-    # Labeling Logic (HH, HL, LH, LL)
+    # Labeling Logic (Highs vs Highs, Lows vs Lows)
+    # Ini benar secara teknikal untuk menentukan HH/LH
     highs = [p for p in pivots if p['type'] == 'High']
     lows = [p for p in pivots if p['type'] == 'Low']
     
@@ -95,11 +101,10 @@ def get_market_structure(df, point=0.01, window=5):
             else: label = "EqL"
         lows[i]['label'] = label
 
-    # Sort Chronologically
+    # Merge & Sort Chronologically (Biar Sequence String Urut)
     all_pivots = sorted(highs + lows, key=lambda x: x['index'])
     
-    # FIX: Generate Sequence String (e.g., "L(LL)->H(LH)->L(LL)")
-    # Ambil 5 pivot terakhir buat sequence
+    # Generate Sequence String
     recent_pivots = all_pivots[-5:]
     seq_list = [f"{p['type'][0]}({p['label']})" for p in recent_pivots]
     sequence_str = "->".join(seq_list)
@@ -107,6 +112,7 @@ def get_market_structure(df, point=0.01, window=5):
     return recent_pivots, sequence_str
 
 def calculate_rules(data):
+    # 1. PREP DATA
     if 'm5' not in data or data['m5'].empty:
         return {"signal": "WAIT", "reason": "Data Empty", "setup": {}, "timestamp": None}
 
@@ -116,21 +122,22 @@ def calculate_rules(data):
     
     bid = float(tick.get('bid', 0) or 0)
     ask = float(tick.get('ask', 0) or 0)
-    # FIX: Ambil Point di awal buat Epsilon pivot & Broker Chaos
     point = float(tick.get('point', 0.01) or 0.01)
     
     last = df_m5.iloc[-1]
     timestamp = last.name
 
-    # --- GUARD BLOCK ---
+    # --- GUARD BLOCK 1: INTEGRITY & SESSION ---
+    
     if bid <= 0 or ask <= 0:
         return {"signal": "WAIT", "reason": "Invalid Tick", "setup": {}, "timestamp": timestamp}
 
-    real_spread_usd = abs(ask - bid)
-    if real_spread_usd > MAX_SPREAD_USD:
-        return {"signal": "WAIT", "reason": f"High Spread: ${real_spread_usd:.2f}", "setup": {}, "timestamp": timestamp}
+    # Session Filter (Time Zone UTC)
+    current_hour_utc = datetime.now(timezone.utc).hour
+    if not (SESSION_START_UTC <= current_hour_utc <= SESSION_END_UTC):
+        return {"signal": "WAIT", "reason": f"Outside Session ({current_hour_utc}h UTC)", "setup": {}, "timestamp": timestamp}
 
-    # Stale Feed Audit
+    # Stale Feed Audit (Adaptive)
     tick_msc = int(meta.get("tick_time_msc") or 0)
     tick_sec = int(meta.get("tick_time") or 0)
     broker_ts = None
@@ -143,14 +150,31 @@ def calculate_rules(data):
     
     if broker_ts:
         lag_raw = time.time() - broker_ts
+        if lag_raw < -2: warnings.append(f"Clock Drift {lag_raw:.1f}s")
+        
         lag_clamped = max(0.0, lag_raw)
         
-        if lag_raw < -2: warnings.append(f"Clock Drift {lag_raw:.1f}s")
-        if lag_clamped > 15: 
-             return {"signal": "WAIT", "reason": f"Stale Feed: {lag_clamped:.1f}s", "setup": {}, "timestamp": timestamp}
+        # IMPLICIT NEWS DETECTOR: Spread agak lebar + Lag mulai naik = News Spike?
+        real_spread_usd = abs(ask - bid)
+        if real_spread_usd > 0.35 and lag_clamped > 2.0:
+            return {"signal": "WAIT", "reason": "High Volatility (News?)", "setup": {}, "timestamp": timestamp}
+
+        # Adaptive Stale Feed
+        if lag_clamped > 8: 
+             return {"signal": "WAIT", "reason": f"Critical Lag: {lag_clamped:.1f}s", "setup": {}, "timestamp": timestamp}
+        elif lag_clamped > 3:
+             warnings.append(f"Mod. Lag {lag_clamped:.1f}s") # Info ke AI/Logger
     else:
         return {"signal": "WAIT", "reason": "No Broker TS", "setup": {}, "timestamp": timestamp}
 
+    # --- GUARD BLOCK 2: PRICE & BROKER ---
+    
+    # Hard Cap Spread (Garbage Data / Major News)
+    real_spread_usd = abs(ask - bid)
+    if real_spread_usd > MAX_SPREAD_USD:
+        return {"signal": "WAIT", "reason": f"High Spread: ${real_spread_usd:.2f}", "setup": {}, "timestamp": timestamp}
+
+    # Broker Chaos
     stop_usd = (int(tick.get("stop_level", 0) or 0)) * point
     if stop_usd > 2.0:
         return {"signal": "WAIT", "reason": "High Stop Level", "setup": {}, "timestamp": timestamp}
@@ -170,7 +194,7 @@ def calculate_rules(data):
             
         trend = "BULLISH" if ema_50 > ema_200 else "BEARISH"
         
-        # FIX: Panggil Structure dengan Point broker
+        # Extract Structure
         m15_pivots, m15_sequence = get_market_structure(df_m15, point=point)
     else:
         return {"signal": "WAIT", "reason": "M15 Missing", "setup": {}, "timestamp": timestamp}
@@ -198,7 +222,7 @@ def calculate_rules(data):
             reason = "SMC: Bullish OB Retest + M15 Trend"
             ob_used = ob_bull
 
-    # LOGIC SELL (ELIF)
+    # LOGIC SELL
     elif trend == "BEARISH" and ob_bear:
         ob_low, ob_high = ob_bear
         touched = last['High'] >= ob_low
@@ -234,7 +258,9 @@ def calculate_rules(data):
         final_sl_dist = max(TARGET_SL_MIN_USD, raw_sl_dist)
         sl_usd_dist = final_sl_dist
         
-        if real_spread_usd > (final_sl_dist * 0.15): return {"signal": "WAIT", "reason": "Spread too expensive", "setup": {}, "timestamp": timestamp}
+        # Spread Ratio (Quality Check) - Cek setelah hard cap
+        if real_spread_usd > (final_sl_dist * 0.15):
+             return {"signal": "WAIT", "reason": "Spread too expensive", "setup": {}, "timestamp": timestamp}
         
         raw_tp_dist = final_sl_dist * RR_RATIO
         final_tp_dist = min(raw_tp_dist, MAX_TP_USD)
@@ -253,13 +279,11 @@ def calculate_rules(data):
             "tp": tp_price
         }
 
-    # Meta Export Lengkap
     export_meta = {
         "indicators": {
             "trend_m15": trend,
             "atr_m5": atr_val,
             "ob_status": "Active" if (ob_bull or ob_bear) else "None",
-            # FIX: Kirim Sequence String biar AI gampang baca
             "m15_structure": {
                 "sequence": m15_sequence,
                 "pivots": m15_pivots
@@ -274,7 +298,6 @@ def calculate_rules(data):
         },
         "warnings": warnings, 
         "spread": real_spread_usd,
-        # FIX: Export Raw Lag ke Root Meta buat Logger/Audit
         "tick_lag_sec_raw": lag_raw,
         "tick_lag_sec": lag_clamped,
         "candle": {
