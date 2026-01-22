@@ -27,7 +27,7 @@ def send_telegram_html(message):
     except: pass
 
 def main():
-    print("="*40 + "\n💀 GOLD KILLER PRO: FINAL NO-TOUCH 💀\n" + "="*40)
+    print("="*40 + "\n💀 GOLD KILLER PRO: PLATINUM EDITION 💀\n" + "="*40)
     logger = TradeLogger()
     
     last_candle_ts = None
@@ -44,6 +44,8 @@ def main():
             df_5m = data['m5']
             last_bar = df_5m.iloc[-1]
             ts = last_bar.name
+            
+            # UTC Safe Check
             if getattr(ts, "tzinfo", None) is None: ts = ts.tz_localize("UTC")
             current_ts = int(ts.timestamp())
 
@@ -79,7 +81,8 @@ def main():
                     if not setup or "entry" not in setup:
                         print("⚠️ Setup incomplete, skipping...")
                     else:
-                        # FIX: Safe Type Casting sebelum Rounding
+                        # FIX: Safe Fingerprint (String Fallback)
+                        # Kalau data error, jangan jadi 0_0_0, tapi pakai string aslinya biar unik
                         try:
                             e_val = float(setup.get('entry', 0) or 0)
                             sl_val = float(setup.get('sl', 0) or 0)
@@ -89,7 +92,10 @@ def main():
                             sl_r = round(sl_val, digits)
                             tp_r = round(tp_val, digits)
                         except:
-                            e_r, sl_r, tp_r = 0, 0, 0
+                            # Kalau gagal cast, pakai raw string biar fingerprint tetep jalan
+                            e_r = str(setup.get('entry', 'err'))
+                            sl_r = str(setup.get('sl', 'err'))
+                            tp_r = str(setup.get('tp', 'err'))
 
                         current_fingerprint = f"{current_ts}_{signal}_{e_r}_{sl_r}_{tp_r}"
                         
