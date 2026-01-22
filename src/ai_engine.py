@@ -20,6 +20,8 @@ def ask_ai_judge(signal_type, bot_reason, metrics):
     m15_struct = metrics.get('m15_structure', [])
     trend = metrics.get('trend_m15', 'NEUTRAL')
 
+    # (Update Prompt Only)
+
     prompt = f"""
     Role: Senior XAUUSD Scalper (SMC & Elliott Wave).
     
@@ -32,23 +34,23 @@ def ask_ai_judge(signal_type, bot_reason, metrics):
     
     Task: Validate Trade Context.
     
-    ELLIOTT WAVE RULES:
-    1. Check Pivot Labels (HH, HL, LH, LL).
-       - BUY SIGNAL requires a sequence of Higher Highs (HH) or Higher Lows (HL).
-       - SELL SIGNAL requires Lower Lows (LL) or Lower Highs (LH).
-    2. Identify Phase:
-       - If price is making HH/HL -> Impulse Phase (Good for Buy).
-       - If price is making LH/LL -> Correction/Down Trend (Bad for Buy).
+    DEFINITIONS:
+    - HH (Higher High) / LH (Lower High) -> Applies to Pivot type 'High'.
+    - HL (Higher Low) / LL (Lower Low) -> Applies to Pivot type 'Low'.
     
-    DECISION LOGIC:
-    - APPROVE if structure aligns with signal direction (e.g. Buy on HL).
-    - REJECT if signal fights the structure (e.g. Buy after a clear LH & LL sequence).
+    ELLIOTT WAVE RULES:
+    1. Trend Confirmation:
+       - BUY SIGNAL: Requires HL or HH sequence. Ideally buying a HL.
+       - SELL SIGNAL: Requires LH or LL sequence. Ideally selling a LH.
+    2. Phase Check:
+       - If recent structure is LH + LL -> Down Trend Impulse. Risky to Buy.
+       - If recent structure is HH + HL -> Up Trend Impulse. Risky to Sell.
     
     Output JSON ONLY:
     {{
       "decision": "APPROVE" or "REJECT",
       "confidence": 0-100,
-      "reason": "Explain structure (e.g. 'Valid buy on HL formation')",
+      "reason": "Explain structure alignment",
       "wave_bias": "Impulse/Correction"
     }}
     """
