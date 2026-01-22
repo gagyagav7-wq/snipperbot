@@ -27,12 +27,12 @@ def send_telegram_html(message):
     except: pass
 
 def main():
-    print("="*40 + "\n💀 GOLD KILLER PRO: BANK GRADE 💀\n" + "="*40)
+    print("="*40 + "\n💀 GOLD KILLER PRO: STABLE 1.0 💀\n" + "="*40)
     logger = TradeLogger()
     
     last_candle_ts = None
     last_logged_ts = None
-    last_ai_fingerprint = None # REVISI: Pakai fingerprint lengkap
+    last_ai_fingerprint = None # Variable Fingerprint Presisi
 
     while True:
         try:
@@ -78,12 +78,16 @@ def main():
                     if not setup or "entry" not in setup:
                         print("⚠️ Setup incomplete, skipping...")
                     else:
-                        # FINGERPRINT: Waktu + Arah + Harga Entry
-                        # Kalau entry geser dikit karena rules update, AI boleh debat lagi
-                        current_fingerprint = f"{current_ts}_{signal}_{setup['entry']}"
+                        # FINGERPRINT LENGKAP: Waktu + Arah + Angka Setup (Dibulatkan)
+                        # Ini mencegah AI skip debat kalau setup berubah signifikan
+                        entry_r = round(setup.get('entry', 0), 2)
+                        sl_r = round(setup.get('sl', 0), 2)
+                        tp_r = round(setup.get('tp', 0), 2)
+                        
+                        current_fingerprint = f"{current_ts}_{signal}_{entry_r}_{sl_r}_{tp_r}"
                         
                         if current_fingerprint != last_ai_fingerprint:
-                            last_ai_fingerprint = current_fingerprint # Lock
+                            last_ai_fingerprint = current_fingerprint 
                             
                             print(f"🤖 AI Judging {signal}...")
                             metrics = {
@@ -96,7 +100,6 @@ def main():
                             decision = str(judge.get("decision", "REJECT")).strip().upper()
                             
                             if decision == "APPROVE":
-                                # HTML Safe
                                 ai_reason = html.escape(str(judge.get("reason", "No Reason")))
                                 e_entry = html.escape(str(setup['entry']))
                                 e_sl = html.escape(str(setup['sl']))
@@ -110,7 +113,6 @@ def main():
                                 
                                 send_telegram_html(text)
                                 
-                                # STATE SAVE CHECK
                                 if save_state_atomic(
                                     active=True,
                                     sig_type=signal,
@@ -123,7 +125,7 @@ def main():
                                     status = "STILL_OPEN"
                                     print(f"✅ {signal} SENT & LOCKED")
                                 else:
-                                    print("🚨 FAILED TO LOCK STATE! Ignoring signal to prevent loop.")
+                                    print("🚨 WRITE FAIL! Signal ignored.")
                                     send_telegram_html("⚠️ <b>SYSTEM ERROR:</b> Disk Write Failed!")
                             else:
                                 print(f"❌ AI REJECTED: {judge.get('reason')}")
