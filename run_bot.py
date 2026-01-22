@@ -1,11 +1,11 @@
 from dotenv import load_dotenv
-load_dotenv() # WAJIB PALING ATAS
+load_dotenv() 
 
 import time
 import os
 import sys
 import requests
-import html # Import html escape
+import html
 from datetime import datetime
 
 from src.data_loader import get_market_data
@@ -18,13 +18,16 @@ def send_telegram_html(message):
     token = os.getenv("TELEGRAM_TOKEN")
     chat_id = os.getenv("TELEGRAM_CHAT_ID")
     if not token or not chat_id: return
-    url = f"https://api.telegram.org/bot{token}/sendMessage"
-    payload = {"chat_id": chat_id, "text": message, "parse_mode": "HTML"}
-    try: requests.post(url, json=payload, timeout=5)
+    try:
+        requests.post(
+            f"https://api.telegram.org/bot{token}/sendMessage",
+            json={"chat_id": chat_id, "text": message, "parse_mode": "HTML"},
+            timeout=5
+        )
     except: pass
 
 def main():
-    print("="*40 + "\n💀 GOLD KILLER PRO: FINAL RELEASE 💀\n" + "="*40)
+    print("="*40 + "\n💀 GOLD KILLER PRO: REALTIME EDITION 💀\n" + "="*40)
     logger = TradeLogger()
     
     last_candle_ts = None
@@ -40,17 +43,20 @@ def main():
             # --- PREP DATA ---
             df_5m = data['m5']
             last_bar = df_5m.iloc[-1]
+            
+            # Timestamp Safe
             ts = last_bar.name
-            if getattr(ts, "tzinfo", None) is None:
-                ts = ts.tz_localize("UTC")
+            if getattr(ts, "tzinfo", None) is None: ts = ts.tz_localize("UTC")
             current_ts = int(ts.timestamp())
 
-            # --- 1. STATUS CHECK ---
-            status = check_signal_status(last_bar['High'], last_bar['Low'])
-            
-            # Kalau status korup (STILL_OPEN gara-gara rename), user harus manual check
-            # Tapi di loop berikutnya file corrupt udah direname, jadi status bakal jadi "NONE"
-            # Ini OK biar bot gak mati selamanya, tapi log di terminal bakal kasih warning.
+            # Ambil Realtime Tick buat TP/SL instan
+            tick = data.get("tick", {})
+            bid = tick.get("bid", 0.0)
+            ask = tick.get("ask", 0.0)
+
+            # --- 1. STATUS CHECK (REALTIME) ---
+            # Kita lempar bid/ask ke fungsi baru
+            status = check_signal_status(last_bar['High'], last_bar['Low'], bid, ask)
             
             if status in ["TP_HIT", "SL_HIT", "EXPIRED"]:
                 finished = status
@@ -70,54 +76,59 @@ def main():
 
                 signal = contract["signal"]
                 
-                # --- 3. SMART AI GATE ---
+                # --- 3. SIGNAL & AI GATE ---
                 if signal in ["BUY", "SELL"] and status == "NONE":
-                    current_ai_key = f"{current_ts}_{signal}"
-                    
-                    if current_ai_key != last_ai_key:
-                        last_ai_key = current_ai_key 
+                    # Guard: Pastikan setup ada isinya
+                    setup = contract.get("setup")
+                    if not setup or "entry" not in setup:
+                        print("⚠️ Setup missing from contract, skipping...")
+                    else:
+                        # Smart Gate Key
+                        current_ai_key = f"{current_ts}_{signal}"
                         
-                        print(f"🤖 AI Judging {signal}...")
-                        metrics = {
-                            **contract.get("meta", {}).get("indicators", {}),
-                            "spread": contract["meta"].get("spread"),
-                            "price": last_bar["Close"]
-                        }
-                        
-                        judge = ask_ai_judge(signal, contract["reason"], metrics)
-                        decision = str(judge.get("decision", "REJECT")).strip().upper()
-                        
-                        if decision == "APPROVE":
-                            setup = contract["setup"]
-                            icon = "🟢" if signal == "BUY" else "🔴"
+                        if current_ai_key != last_ai_key:
+                            last_ai_key = current_ai_key
                             
-                            # Safe HTML Handling (Untuk semua field)
-                            ai_reason = html.escape(str(judge.get("reason", "No Reason")))
-                            entry_safe = html.escape(str(setup.get('entry', '0')))
-                            sl_safe    = html.escape(str(setup.get('sl', '0')))
-                            tp_safe    = html.escape(str(setup.get('tp', '0')))
+                            print(f"🤖 AI Judging {signal}...")
+                            metrics = {
+                                **contract.get("meta", {}).get("indicators", {}),
+                                "spread": contract["meta"].get("spread"),
+                                "price": last_bar["Close"]
+                            }
                             
-                            text = (f"{icon} <b>SIGNAL {signal} APPROVED</b>\n\n"
-                                    f"Entry: <code>{entry_safe}</code>\n"
-                                    f"SL: <code>{sl_safe}</code>\n"
-                                    f"TP: <code>{tp_safe}</code>\n\n"
-                                    f"⚖️ <b>AI Debate:</b> <i>{ai_reason}</i>")
+                            judge = ask_ai_judge(signal, contract["reason"], metrics)
+                            decision = str(judge.get("decision", "REJECT")).strip().upper()
                             
-                            send_telegram_html(text)
-                            
-                            save_state_atomic(
-                                active=True,
-                                sig_type=signal,
-                                sl=setup['sl'],
-                                tp=setup['tp'],
-                                entry=setup['entry'],
-                                reason=judge.get("reason", ""),
-                                candle_ts=current_ts
-                            )
-                            status = "STILL_OPEN"
-                            print(f"✅ {signal} SENT & LOCKED")
-                        else:
-                            print(f"❌ AI REJECTED: {judge.get('reason')}")
+                            if decision == "APPROVE":
+                                icon = "🟢" if signal == "BUY" else "🔴"
+                                
+                                # Escape semua inputan biar aman
+                                ai_reason = html.escape(str(judge.get("reason", "No Reason")))
+                                e_entry = html.escape(str(setup['entry']))
+                                e_sl = html.escape(str(setup['sl']))
+                                e_tp = html.escape(str(setup['tp']))
+                                
+                                text = (f"{icon} <b>SIGNAL {signal} APPROVED</b>\n\n"
+                                        f"Entry: <code>{e_entry}</code>\n"
+                                        f"SL: <code>{e_sl}</code>\n"
+                                        f"TP: <code>{e_tp}</code>\n\n"
+                                        f"⚖️ <b>AI Debate:</b> <i>{ai_reason}</i>")
+                                
+                                send_telegram_html(text)
+                                
+                                save_state_atomic(
+                                    active=True,
+                                    sig_type=signal,
+                                    sl=setup['sl'],
+                                    tp=setup['tp'],
+                                    entry=setup['entry'],
+                                    reason=judge.get("reason", ""),
+                                    candle_ts=current_ts
+                                )
+                                status = "STILL_OPEN"
+                                print(f"✅ {signal} SENT & LOCKED")
+                            else:
+                                print(f"❌ AI REJECTED: {judge.get('reason')}")
                 
                 last_candle_ts = current_ts
 
