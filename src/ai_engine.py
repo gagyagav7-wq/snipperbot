@@ -16,7 +16,6 @@ def ask_ai_judge(signal_type, bot_reason, metrics):
     if MODEL is None: init_ai()
     if MODEL is None: return {"decision": "REJECT", "reason": "AI Config Error"}
 
-    # Extract Data (Defensive)
     trend = metrics.get('trend_m15', 'NEUTRAL')
     m15_struct = metrics.get('m15_structure') 
     if not m15_struct:
@@ -25,13 +24,12 @@ def ask_ai_judge(signal_type, bot_reason, metrics):
     sequence = m15_struct.get('sequence', 'N/A')
     last_pivot = m15_struct.get('last_pivot', 'N/A')
     dist_to_pivot = m15_struct.get('dist_to_pivot', 0.0)
-    # FIX: Ambil Signed Legs
-    leg_sizes = m15_struct.get('leg_sizes_signed', []) 
+    leg_sizes = m15_struct.get('leg_sizes_signed', [])
 
     warnings = metrics.get('warnings', [])
     warn_str = ", ".join(warnings) if warnings else "None"
 
-    # PROMPT V15: Directional Leg Analysis
+    # PROMPT V16: Outside Bar Awareness
     prompt = f"""
     Role: Senior XAUUSD Scalper (SMC & ZigZag Wave Analyst).
     
@@ -41,7 +39,7 @@ def ask_ai_judge(signal_type, bot_reason, metrics):
     
     M15 Structure (ZigZag): {sequence}
     Recent Leg Sizes (+Up/-Down): {leg_sizes} 
-    Last Pivot: {last_pivot}
+    Last Pivot: {last_pivot} (Note: [OBS] = Outside Bar / Liquidity Sweep)
     Distance to Pivot: ${dist_to_pivot:.2f}
     
     System Warnings: {warn_str}
@@ -53,15 +51,14 @@ def ask_ai_judge(signal_type, bot_reason, metrics):
        - BUY: Structure should imply Higher Lows (HL).
        - SELL: Structure should imply Lower Highs (LH).
        
-    2. WAVE MOMENTUM (Directional Legs):
-       - Look at 'Recent Leg Sizes'. 
-       - If BUYING: You want Positive (+) legs to be large (Impulse), and Negative (-) legs to be small (Correction).
-       - If SELLING: You want Negative (-) legs to be large (Impulse).
-       - REJECT if momentum is opposite to signal.
+    2. WAVE MOMENTUM:
+       - BUY: Look for positive legs > negative legs.
+       - SELL: Look for negative legs > positive legs (magnitude).
        
-    3. DON'T CHASE:
-       - Avoid buying right at the top of a large (+) leg.
-       - Avoid selling right at the bottom of a large (-) leg.
+    3. OBS / LIQUIDITY SWEEP:
+       - If Last Pivot has [OBS], it means a liquidity sweep happened.
+       - Buying after a Low [OBS] is often high probability (Stop Hunt).
+       - Selling after a High [OBS] is often high probability.
     
     DECISION:
     - APPROVE: Structure aligns, momentum supports signal.
@@ -71,7 +68,7 @@ def ask_ai_judge(signal_type, bot_reason, metrics):
     {{
       "decision": "APPROVE" or "REJECT",
       "confidence": 0-100,
-      "reason": "Explain structure & momentum",
+      "reason": "Explain structure, momentum & OBS context",
       "wave_bias": "Impulse/Correction"
     }}
     """
