@@ -1,5 +1,5 @@
 from dotenv import load_dotenv
-load_dotenv() 
+load_dotenv() # WAJIB PALING ATAS
 
 import time
 import os
@@ -24,12 +24,12 @@ def send_telegram_html(message):
     except: pass
 
 def main():
-    print("="*40 + "\n💀 GOLD KILLER PRO: LOCKDOWN VERSION 💀\n" + "="*40)
+    print("="*40 + "\n💀 GOLD KILLER PRO: HERMETIC VERSION 💀\n" + "="*40)
     logger = TradeLogger()
     
     last_candle_ts = None
     last_logged_ts = None
-    last_ai_judged_candle_ts = None # GATE AI TERBARU
+    last_ai_key = None # GATE PINTAR (Waktu + Sinyal)
 
     while True:
         try:
@@ -45,19 +45,18 @@ def main():
                 ts = ts.tz_localize("UTC")
             current_ts = int(ts.timestamp())
 
-            # --- 1. STATUS CHECK (Every Tick) ---
-            # Hapus param current_ts karena sudah pakai Wall-Time di manager
+            # --- 1. STATUS CHECK ---
             status = check_signal_status(last_bar['High'], last_bar['Low'])
             
             if status in ["TP_HIT", "SL_HIT", "EXPIRED"]:
                 finished = status
                 icon = "💰" if finished == "TP_HIT" else "💀"
                 send_telegram_html(f"{icon} <b>SIGNAL FINISHED:</b> {finished}")
-                save_state_atomic(active=False)
+                save_state_atomic(active=False) # Bersih-bersih state
                 status = "NONE" # Reset lokal
                 print(f"✅ State Cleared: {finished}")
 
-            # --- 2. CANDLE GATE (Logic & AI) ---
+            # --- 2. CANDLE GATE ---
             if current_ts != last_candle_ts:
                 contract = calculate_rules(data)
                 
@@ -67,12 +66,14 @@ def main():
 
                 signal = contract["signal"]
                 
-                # --- 3. SIGNAL & AI GATE ---
+                # --- 3. SMART AI GATE ---
                 if signal in ["BUY", "SELL"] and status == "NONE":
-                    # Cegah AI Spam: Jika candle ini sudah didebat, jangan tanya lagi
-                    if current_ts != last_ai_judged_candle_ts:
-                        # KUNCI GERBANG SEBELUM PANGGIL AI
-                        last_ai_judged_candle_ts = current_ts
+                    # Kunci Unik: Waktu Candle + Arah Sinyal
+                    current_ai_key = f"{current_ts}_{signal}"
+                    
+                    # Cek apakah kombinasi ini sudah pernah didebat?
+                    if current_ai_key != last_ai_key:
+                        last_ai_key = current_ai_key # Kunci dulu biar gak spam
                         
                         print(f"🤖 AI Judging {signal}...")
                         metrics = {
@@ -87,25 +88,29 @@ def main():
                         if decision == "APPROVE":
                             setup = contract["setup"]
                             icon = "🟢" if signal == "BUY" else "🔴"
-                            ai_reason = html.escape(str(judge.get("reason", "No Reason")))
+                            
+                            # Safe HTML Handling (Biar gak ada 'None' nongol)
+                            reason_raw = judge.get("reason") or "No reason provided"
+                            ai_reason = html.escape(str(reason_raw))
                             
                             text = (f"{icon} <b>SIGNAL {signal} APPROVED</b>\n\n"
-                                    f"Entry: <code>{html.escape(str(setup['entry']))}</code>\n"
-                                    f"SL: <code>{html.escape(str(setup['sl']))}</code>\n"
-                                    f"TP: <code>{html.escape(str(setup['tp']))}</code>\n\n"
+                                    f"Entry: <code>{setup['entry']}</code>\n"
+                                    f"SL: <code>{setup['sl']}</code>\n"
+                                    f"TP: <code>{setup['tp']}</code>\n\n"
                                     f"⚖️ <b>AI Debate:</b> <i>{ai_reason}</i>")
                             
                             send_telegram_html(text)
+                            
                             save_state_atomic(
                                 active=True,
                                 sig_type=signal,
                                 sl=setup['sl'],
                                 tp=setup['tp'],
                                 entry=setup['entry'],
-                                reason=judge.get("reason", ""),
+                                reason=reason_raw,
                                 candle_ts=current_ts
                             )
-                            status = "STILL_OPEN" # Segera update variabel lokal
+                            status = "STILL_OPEN"
                             print(f"✅ {signal} SENT & LOCKED")
                         else:
                             print(f"❌ AI REJECTED: {judge.get('reason')}")
