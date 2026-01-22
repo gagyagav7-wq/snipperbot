@@ -16,19 +16,27 @@ def ask_ai_judge(signal_type, bot_reason, metrics):
     if MODEL is None: init_ai()
     if MODEL is None: return {"decision": "REJECT", "reason": "AI Config Error"}
 
-    # --- 1. EXTRACT DATA DARI METRICS ---
-    # Ambil data trend & struktur M15
-    indicators = metrics.get('indicators', {})
-    trend = indicators.get('trend_m15', 'NEUTRAL')
+    # --- FIX 1: DATA PLUMBING (MATCH V9 RUN_BOT) ---
+    # Karena di run_bot data 'indicators' sudah di-unpack,
+    # kita bisa akses langsung dari root metrics.
     
-    m15_data = indicators.get('m15_structure', {})
-    sequence = m15_data.get('sequence', 'N/A')
+    # Trend M15
+    trend = metrics.get('trend_m15', 'NEUTRAL')
+    
+    # Structure (Sequence & Pivots)
+    # Hati-hati: m15_structure bisa jadi ada di root ATAU di dalam 'indicators'
+    # tergantung cara kirimnya. Kita cek dua-duanya biar aman (Defensive).
+    m15_struct = metrics.get('m15_structure') 
+    if not m15_struct:
+        m15_struct = metrics.get('indicators', {}).get('m15_structure', {})
+        
+    sequence = m15_struct.get('sequence', 'N/A')
 
-    # Ambil Warnings (Laporan dari Indicators.py soal Lag/Drift)
+    # Warnings & Lag
     warnings = metrics.get('warnings', [])
     warn_str = ", ".join(warnings) if warnings else "None"
 
-    # --- 2. CONSTRUCT PROMPT ---
+    # --- 2. PROMPT CONSTRUCTION ---
     prompt = f"""
     Role: Senior XAUUSD Scalper (SMC & Elliott Wave).
     
@@ -40,7 +48,7 @@ def ask_ai_judge(signal_type, bot_reason, metrics):
     (Format: Type(Label) -> Next Type(Label)... Chronological Order)
     
     System Warnings: {warn_str}
-    (Note: If warnings contain 'Lag' or 'Drift', be stricter. If warnings imply high volatility, REJECT).
+    (Note: If warnings contain 'Lag' or 'Drift', increase scrutiny. If high volatility implied, REJECT).
     
     Task: Validate Trade Context.
     
@@ -63,13 +71,10 @@ def ask_ai_judge(signal_type, bot_reason, metrics):
     }}
     """
 
-    # --- 3. CALL AI & PARSE ---
     try:
         response = MODEL.generate_content(prompt, generation_config={"response_mime_type": "application/json"})
         text = response.text
-        # Pakai Regex buat bersihin kalau ada teks aneh di luar JSON
         match = re.search(r'\{.*\}', text, re.DOTALL)
         return json.loads(match.group()) if match else json.loads(text)
     except:
-        # Fallback kalau AI error/timeout
         return {"decision": "REJECT", "reason": "AI Error"}
