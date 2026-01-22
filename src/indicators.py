@@ -1,342 +1,135 @@
 import pandas as pd
 import pandas_ta as ta
-import pytz
-import time
-from datetime import datetime
 
-# ==========================================
-# ⚙️ KONFIGURASI SISTEM
-# ==========================================
-WIB = pytz.timezone('Asia/Jakarta')
-SESSION_START = 14  
-SESSION_END = 23    
-
-# Safety & Risk
-STALE_FEED_THRESHOLD     = 30   
-CLOCK_DRIFT_LIMIT        = 30   
-ABNORMAL_LEVEL_THRESHOLD = 100  
-MAX_SPREAD               = 35   
-EPS                      = 1e-9 
-BUFFER_STOP_LEVEL        = 10  
-MIN_ABS_STOP_DIST        = 50  
-ATR_SL_MULT              = 1.5 
-RR_RATIO                 = 2.0 
-
-# Strategy Params
-MIN_BODY_ATR        = 0.3  
-ADX_THRESHOLD       = 20   
-SAFE_DIST_ATR       = 0.5  
-MIN_SAFE_DIST_PRICE = 0.50 
-MAX_SAFE_DIST_PRICE = 2.00 
-
-def calculate_rules(data_pack):
+def find_order_block(df):
+    """Mencari Order Block terakhir (Candle berlawanan sebelum move kencang)"""
+    # OB Bullish: Candle merah terakhir sebelum kenaikan impulsif
+    # OB Bearish: Candle hijau terakhir sebelum penurunan impulsif
     
-    contract = {
-        "signal": "NO",
-        "reason": "Initializing...",
-        "setup": {},
-        "timestamp": None,
-        "tick": {},
-        "df_5m": pd.DataFrame(),
-        "meta": {"spread": 0, "session": False, "warnings": []}
-    }
+    # Ambil 50 candle terakhir biar cepat
+    subset = df.tail(50).copy()
+    ob_bull = None
+    ob_bear = None
+    
+    # Loop mundur
+    for i in range(len(subset)-4, 0, -1):
+        # Deteksi Bullish OB
+        if subset['Close'].iloc[i] < subset['Open'].iloc[i]: # Candle Merah
+            # Cek apakah setelahnya ada kenaikan impulsif (BOS)
+            if subset['Close'].iloc[i+1] > subset['High'].iloc[i] and \
+               subset['Close'].iloc[i+2] > subset['High'].iloc[i+1]:
+                ob_bull = (subset['Low'].iloc[i], subset['High'].iloc[i]) # Zone OB
+                break # Ambil yang paling fresh
+                
+    for i in range(len(subset)-4, 0, -1):
+        # Deteksi Bearish OB
+        if subset['Close'].iloc[i] > subset['Open'].iloc[i]: # Candle Hijau
+            # Cek apakah setelahnya ada penurunan impulsif
+            if subset['Close'].iloc[i+1] < subset['Low'].iloc[i] and \
+               subset['Close'].iloc[i+2] < subset['Low'].iloc[i+1]:
+                ob_bear = (subset['Low'].iloc[i], subset['High'].iloc[i])
+                break
 
-    # --- GUARD 1: VALIDASI DATA & WAKTU ---
-    if not data_pack or 'tick' not in data_pack:
-        contract["reason"] = "Data Empty"
-        return contract
+    return ob_bull, ob_bear
 
-    meta = data_pack.get("meta", {})
-    tick_time_msc = meta.get("tick_time_msc")
-    tick_time_sec = meta.get("tick_time")
-    server_time   = meta.get("server_time")
-    local_time    = time.time()
-    broker_ts     = None
+def calculate_rules(data):
+    # Pastikan data DataFrame
+    df = data['m5'].copy()
+    last = df.iloc[-1]
+    prev = df.iloc[-2]
+    
+    # --- 1. TREND FILTER (EMA) ---
+    # Scalping butuh arah trend jelas
+    ema_50 = ta.ema(df['Close'], length=50).iloc[-1]
+    ema_200 = ta.ema(df['Close'], length=200).iloc[-1]
+    
+    trend = "BULLISH" if ema_50 > ema_200 else "BEARISH"
+    
+    # --- 2. SMC: ORDER BLOCK DETECTION ---
+    ob_bull, ob_bear = find_order_block(df)
+    
+    # Jarak harga ke OB (Points)
+    dist_to_bull_ob = (last['Close'] - ob_bull[1]) if ob_bull else 99999
+    dist_to_bear_ob = (ob_bear[0] - last['Close']) if ob_bear else 99999
+    
+    # --- 3. PRICE ACTION (ENTRY TRIGGER) ---
+    signal = "WAIT"
+    reason = "Scanning Market Structure..."
+    
+    # Logic BUY (Scalping):
+    # Trend Bullish + Harga mantul di Bullish OB + Ada rejection (Pinbar/Engulfing)
+    is_bullish_rejection = last['Close'] > last['Open'] and \
+                           (last['Open'] - last['Low']) > (last['Close'] - last['Open']) * 1.5
+                           
+    if trend == "BULLISH" and ob_bull and dist_to_bull_ob < 500: # Dekat OB (50 pips tolerance)
+        if is_bullish_rejection:
+            signal = "BUY"
+            reason = "SMC: Rejection at Bullish OB + Trend Align"
 
-    # [CRITICAL CHECK] Timestamp Logic dengan Fallback
-    if tick_time_msc is not None and tick_time_msc > 0:
-        broker_ts = tick_time_msc / 1000.0
-    elif tick_time_sec is not None and tick_time_sec > 0:
-        broker_ts = float(tick_time_sec)
+    # Logic SELL (Scalping):
+    # Trend Bearish + Harga mantul di Bearish OB
+    is_bearish_rejection = last['Close'] < last['Open'] and \
+                           (last['High'] - last['Open']) > (last['Open'] - last['Close']) * 1.5
 
-    if broker_ts is not None:
-        data_lag = local_time - broker_ts
-        if data_lag > STALE_FEED_THRESHOLD:
-            contract["reason"] = f"BROKER LAG ({data_lag:.1f}s)"
-            return contract
-        if -10.0 < data_lag < -2.0:
-            contract["meta"]["warnings"].append(f"Clock Drift ({data_lag:.2f}s)")
-        elif data_lag <= -10.0:
-            contract["reason"] = f"CRITICAL: Clock Behind ({data_lag:.1f}s)"
-            return contract
-    else:
-        contract["reason"] = "CRITICAL: Invalid Broker Timestamp (None/0)"
-        return contract
+    if trend == "BEARISH" and ob_bear and dist_to_bear_ob < 500:
+        if is_bearish_rejection:
+            signal = "SELL"
+            reason = "SMC: Rejection at Bearish OB + Trend Align"
 
-    if server_time is not None:
-        drift = local_time - float(server_time)
-        drift_int = int(round(drift))
-        if abs(drift_int) > 5: contract["meta"]["system_drift"] = drift_int
-        if abs(drift_int) > CLOCK_DRIFT_LIMIT:
-             contract["reason"] = f"System Clock Mismatch ({drift_int}s)"
-             return contract
-
-    # --- GUARD 2: VALIDASI TICK & HISTORY ---
-    # ... (setelah dapet data market) ...
-    tick = data['tick']
-        
-    # 1. CEK NASIB TRADE SEBELUMNYA
-    status = check_trade_status(tick['bid'], tick['ask'], tick['high'], tick['low'])
-        
-    if status in ["TP_HIT", "SL_HIT"]:
-        color = "✅" if status == "TP_HIT" else "❌"
-        send_telegram(f"{color} *TRADE CLOSED:* {status}")
-        print(f"[{datetime.now().strftime('%H:%M')}] {status}! Memory Cleared.")
-        save_state(active=False) # RESET MEMORI
-            
-    # 2. KALAU ADA SINYAL BARU
+    # --- 4. SCALPING SETUP (SL 30-50 Pips) ---
+    setup = {}
     if signal in ["BUY", "SELL"]:
-        # CEK: LAGI ADA TRADE JALAN GAK?
-        if status == "STILL_OPEN":
-            # Jangan kirim sinyal kalau yang lama belum kelar
-            contract["signal"] = "WAIT"
-            contract["reason"] = "Waiting for SL/TP of previous trade"
-        else:
-            # BARU BOLEH KIRIM SINYAL & SIMPAN KE MEMORI
-            send_telegram(msg)
-            save_state(active=True, signal_type=signal, sl=setup['sl'], tp=setup['tp'])
-
-    # --- KONVERSI LIST KE DATAFRAME (FIX TIMEZONE) ---
-    # Tambahkan parameter utc=True biar Python tau ini jam universal
-    df_5m = pd.DataFrame(data_pack['m5'])
-    df_5m['time'] = pd.to_datetime(df_5m['time'], unit='s', utc=True) 
-    df_5m.set_index('time', inplace=True)
-
-    df_15m = pd.DataFrame(data_pack['m15'])
-    df_15m['time'] = pd.to_datetime(df_15m['time'], unit='s', utc=True)
-    df_15m.set_index('time', inplace=True)
-
-    hist = data_pack.get('history', {})
-    
-    if hist.get('pdh') is None or hist.get('pdl') is None:
-        contract["reason"] = "History Missing"
-        return contract
-
-    contract["df_5m"] = df_5m
-    contract["tick"] = tick
-    contract["meta"]["d1_time"] = hist.get("d1_time")
-
-    if len(df_5m) < 60 or len(df_15m) < 200:
-        contract["reason"] = "Not Enough Bars"
-        return contract
-
-    # --- 3. INDIKATOR ---
-    df_5m['EMA_50'] = df_5m.ta.ema(length=50)
-    df_5m['ATR']    = df_5m.ta.atr(length=14)
-    df_5m['RSI']    = df_5m.ta.rsi(length=14)
-    
-    df_15m['EMA_50']  = df_15m.ta.ema(length=50)
-    df_15m['EMA_200'] = df_15m.ta.ema(length=200)
-    
-    # ADX Extraction
-    adx_df = df_15m.ta.adx(length=14)
-    df_15m['ADX'] = 0; df_15m['DMP'] = 0; df_15m['DMN'] = 0
-    adx_columns_found = False
-
-    if adx_df is not None and not adx_df.empty:
-        col_adx = [c for c in adx_df.columns if c.startswith("ADX")]
-        col_dmp = [c for c in adx_df.columns if c.startswith("DMP")]
-        col_dmn = [c for c in adx_df.columns if c.startswith("DMN")]
+        entry_price = last['Close']
         
-        if col_adx and col_dmp and col_dmn:
-            df_15m['ADX'] = adx_df[col_adx[0]]
-            df_15m['DMP'] = adx_df[col_dmp[0]]
-            df_15m['DMN'] = adx_df[col_dmn[0]]
-            adx_columns_found = True
-        else:
-            contract["meta"]["warnings"].append("ADX Cols Missing")
-    else:
-        contract["meta"]["warnings"].append("ADX Calc Failed")
-
-    last_5m  = df_5m.iloc[-1]
-    prev_5m  = df_5m.iloc[-2]
-    last_15m = df_15m.iloc[-1]
-
-    adx_ok = adx_columns_found and \
-             pd.notna(last_15m['ADX']) and \
-             pd.notna(last_15m['DMP']) and \
-             pd.notna(last_15m['DMN'])
-
-    if (pd.isna(last_5m['ATR']) or 
-        pd.isna(last_15m['EMA_200']) or 
-        not adx_ok): 
-        contract["reason"] = "Indicators Calculating (NaN)..."
-        return contract
-
-    # --- 4. TIMEZONE ---
-    try:
-        wib_time = last_5m.name.tz_convert(WIB)
-        contract["timestamp"] = wib_time
-        if not (SESSION_START <= wib_time.hour < SESSION_END):
-            contract["meta"]["session"] = False
-            contract["reason"] = f"Outside Killzone ({wib_time.hour:02d}:00)"
-            return contract
-        contract["meta"]["session"] = True
-    except Exception as e:
-        contract["reason"] = f"Time Error: {e}"
-        return contract
-
-    # --- 5. MARKET FILTER ---
-    spread = tick.get('spread', 999)
-    stop_level = tick.get('stop_level', 0)
-    freeze_level = tick.get('freeze_level', 0)
-    contract["meta"]["spread"] = spread
-
-    if stop_level > ABNORMAL_LEVEL_THRESHOLD or freeze_level > ABNORMAL_LEVEL_THRESHOLD:
-        contract["signal"] = "SKIP"
-        contract["reason"] = f"Broker Chaos (Stop: {stop_level})"
-        return contract
-
-    if spread > MAX_SPREAD:
-        contract["signal"] = "SKIP"
-        contract["reason"] = f"High Spread: {spread}"
-        return contract
-
-    # --- 6. STRATEGY ---
-    strong_bull = (last_15m['Close'] > last_15m['EMA_50']) and \
-                  (last_15m['EMA_50'] > last_15m['EMA_200']) and \
-                  (last_15m['ADX'] > ADX_THRESHOLD) and \
-                  (last_15m['DMP'] > last_15m['DMN'])
-
-    strong_bear = (last_15m['Close'] < last_15m['EMA_50']) and \
-                  (last_15m['EMA_50'] < last_15m['EMA_200']) and \
-                  (last_15m['ADX'] > ADX_THRESHOLD) and \
-                  (last_15m['DMN'] > last_15m['DMP'])
-
-    body = abs(last_5m['Close'] - last_5m['Open'])
-    min_body = last_5m['ATR'] * MIN_BODY_ATR
-    
-    bull_engulf = (last_5m['Close'] > last_5m['Open']) and \
-                  (last_5m['Open'] < prev_5m['Close']) and \
-                  (last_5m['Close'] > prev_5m['Open']) and \
-                  (body > min_body) and \
-                  (last_5m['Close'] > prev_5m['High']) and \
-                  (last_5m['RSI'] < 70)
-
-    bear_engulf = (last_5m['Close'] < last_5m['Open']) and \
-                  (last_5m['Open'] > prev_5m['Close']) and \
-                  (last_5m['Close'] < prev_5m['Open']) and \
-                  (body > min_body) and \
-                  (last_5m['Close'] < prev_5m['Low']) and \
-                  (last_5m['RSI'] > 30)
-
-    # --- 7. EKSEKUSI ---
-    def to_points(val): return val / point
-
-    min_dist_req = stop_level + freeze_level + spread + BUFFER_STOP_LEVEL
-    min_sl_dist_pts = max(min_dist_req, MIN_ABS_STOP_DIST)
-
-    # Adaptive Safe Distance
-    raw_safe_dist_price = last_5m['ATR'] * SAFE_DIST_ATR
-    safe_dist_price = max(MIN_SAFE_DIST_PRICE, min(MAX_SAFE_DIST_PRICE, raw_safe_dist_price))
-    adaptive_safe_dist_pts = to_points(safe_dist_price)
-    
-    contract["meta"]["safe_dist_pts"] = adaptive_safe_dist_pts
-    contract["meta"]["safe_dist_price"] = safe_dist_price
-
-    # ---------------------------------------------------------
-    # 👇 EXPORT DATA LOGGER DI SINI (SEBELUM LOGIC RETURN) 👇
-    # ---------------------------------------------------------
-    
-    input_meta = data_pack.get("meta", {})
-    contract["meta"]["tick_time"]     = input_meta.get("tick_time")
-    contract["meta"]["tick_time_msc"] = input_meta.get("tick_time_msc")
-    contract["meta"]["server_time"]   = input_meta.get("server_time")
-
-    try:
-        contract["meta"]["candle"] = {
-            "close": float(last_5m.get('Close', 0)),
-            "high":  float(last_5m.get('High', 0)),
-            "low":   float(last_5m.get('Low', 0)),
-            "time":  str(last_5m.name)
-        }
-    except:
-        contract["meta"]["candle"] = {}
-
-    try:
-        contract["meta"]["indicators"] = {
-            "rsi": round(float(last_5m.get('RSI', 0)), 2),
-            "atr": round(float(last_5m.get('ATR', 0)), 5),
-            "adx": round(float(last_15m.get('ADX', 0)), 2),
-            "dmp": round(float(last_15m.get('DMP', 0)), 2),
-            "dmn": round(float(last_15m.get('DMN', 0)), 2),
-            "ema50_m15": round(float(last_15m.get('EMA_50', 0)), 2),
-            "ema200_m15": round(float(last_15m.get('EMA_200', 0)), 2)
-        }
-    except Exception:
-        contract["meta"]["indicators"] = {}
-
-    # ---------------------------------------------------------
-    # LOGIC SINYAL BUY/SELL
-    # ---------------------------------------------------------
-
-    # -- SETUP BUY --
-    if bull_engulf and strong_bull:
-        dist_pdh_pts = to_points(hist['pdh'] - tick['ask'])
+        # SL WAJIB 30-50 Pips (300 - 500 Points)
+        # Kita set default 40 pips (400 points) atau sesuaikan High/Low candle
+        sl_pips = 400 # Default 40 pips
+        tp_pips = 600 # RR 1:1.5 (60 pips)
         
-        if 0 < dist_pdh_pts < (adaptive_safe_dist_pts - EPS):
-            contract["signal"] = "SKIP"
-            contract["meta"]["dist_pdh_pts"] = dist_pdh_pts
-            contract["meta"]["dist_pdh_price"] = dist_pdh_pts * point
-            contract["reason"] = f"Near PDH ({dist_pdh_pts:.1f} < {adaptive_safe_dist_pts:.1f} pts)"
-            return contract
+        if signal == "BUY":
+            sl_price = entry_price - (sl_pips * 0.001) # XAU 1 point = 0.001 (cek digit broker)
+            # Opsional: Taruh SL di bawah Low Candle Trigger kalau < 30 pips, tapi min 30 pips
+            swing_low = min(last['Low'], prev['Low'])
+            
+            # Kunci SL minimal 30 pips, maksimal 50 pips
+            real_sl_dist = (entry_price - swing_low) * 1000
+            if real_sl_dist < 300: sl_price = entry_price - 0.30 # Min 30 pips
+            elif real_sl_dist > 500: sl_price = entry_price - 0.50 # Max 50 pips
+            else: sl_price = swing_low - 0.05 # Di bawah swing dikit
+            
+            tp_price = entry_price + (entry_price - sl_price) * 1.5 # RR 1:1.5
+            
+        else: # SELL
+            sl_price = entry_price + (sl_pips * 0.001)
+            swing_high = max(last['High'], prev['High'])
+            
+            real_sl_dist = (swing_high - entry_price) * 1000
+            if real_sl_dist < 300: sl_price = entry_price + 0.30
+            elif real_sl_dist > 500: sl_price = entry_price + 0.50
+            else: sl_price = swing_high + 0.05
+            
+            tp_price = entry_price - (sl_price - entry_price) * 1.5
 
-        entry = tick['ask']
-        sl_dist_raw = last_5m['ATR'] * ATR_SL_MULT
-        if to_points(sl_dist_raw) < min_sl_dist_pts: sl_dist_raw = min_sl_dist_pts * point
-        
-        contract["signal"] = "BUY"
-        contract["reason"] = f"Bull Engulf + Strong Trend (ADX {int(last_15m['ADX'])})"
-        contract["setup"] = {
-            "action": "BUY", "entry": round(entry, digits),
-            "sl": round(entry - sl_dist_raw, digits),
-            "tp": round(entry + (sl_dist_raw * RR_RATIO), digits),
-            "atr": round(last_5m['ATR'], digits)
+        setup = {
+            "entry": entry_price,
+            "sl": sl_price,
+            "tp": tp_price
         }
 
-    # -- SETUP SELL --
-    elif bear_engulf and strong_bear:
-        dist_pdl_pts = to_points(tick['bid'] - hist['pdl'])
-        
-        if 0 < dist_pdl_pts < (adaptive_safe_dist_pts - EPS):
-            contract["signal"] = "SKIP"
-            contract["meta"]["dist_pdl_pts"] = dist_pdl_pts
-            contract["meta"]["dist_pdl_price"] = dist_pdl_pts * point
-            contract["reason"] = f"Near PDL ({dist_pdl_pts:.1f} < {adaptive_safe_dist_pts:.1f} pts)"
-            return contract
-
-        entry = tick['bid']
-        sl_dist_raw = last_5m['ATR'] * ATR_SL_MULT
-        if to_points(sl_dist_raw) < min_sl_dist_pts: sl_dist_raw = min_sl_dist_pts * point
-
-        contract["signal"] = "SELL"
-        contract["reason"] = f"Bear Engulf + Strong Trend (ADX {int(last_15m['ADX'])})"
-        contract["setup"] = {
-            "action": "SELL", "entry": round(entry, digits),
-            "sl": round(entry + sl_dist_raw, digits),
-            "tp": round(entry - (sl_dist_raw * RR_RATIO), digits),
-            "atr": round(last_5m['ATR'], digits)
+    return {
+        "signal": signal,
+        "reason": reason,
+        "setup": setup,
+        "timestamp": last.name,
+        "meta": {
+            "indicators": {
+                "trend": trend,
+                "ema50": ema_50,
+                "dist_ob_bull": dist_to_bull_ob if ob_bull else "None",
+                "dist_ob_bear": dist_to_bear_ob if ob_bear else "None",
+                "candle_pattern": "Rejection" if (is_bullish_rejection or is_bearish_rejection) else "Normal"
+            },
+            "spread": 0, # Placeholder, diisi di run_bot kalau ada
+            "price": last['Close']
         }
-    
-    else:
-        adx_val = int(last_15m['ADX']) if adx_ok else 0
-        if (bull_engulf or bear_engulf) and not adx_ok:
-            contract["reason"] = "Pattern Found but ADX Missing"
-        elif bull_engulf and not strong_bull:
-            contract["reason"] = f"Bull Pattern but Weak Trend (ADX {adx_val})"
-        elif bear_engulf and not strong_bear:
-            contract["reason"] = f"Bear Pattern but Weak Trend (ADX {adx_val})"
-        else:
-            contract["reason"] = "No Setup"
-
-    return contract
+    }
