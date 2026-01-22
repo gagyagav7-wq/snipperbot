@@ -10,7 +10,6 @@ def save_state_atomic(active, sig_type=None, sl=0.0, tp=0.0, entry=0.0, reason="
     now_wall = int(time.time())
     state = {
         "active": bool(active),
-        # Kalau active=False, kosongkan data numerik (Clean Audit)
         "type": sig_type if active else None,
         "entry": float(entry) if active else 0.0,
         "sl": float(sl) if active else 0.0,
@@ -22,17 +21,20 @@ def save_state_atomic(active, sig_type=None, sl=0.0, tp=0.0, entry=0.0, reason="
     }
     
     temp_file = FILE_PATH + ".tmp"
-    with open(temp_file, "w") as f:
-        json.dump(state, f, indent=4)
-        f.flush()
-        os.fsync(f.fileno())
-    os.replace(temp_file, FILE_PATH)
+    try:
+        with open(temp_file, "w") as f:
+            json.dump(state, f, indent=4)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(temp_file, FILE_PATH)
+        return True
+    except Exception as e:
+        print(f"🚨 STATE WRITE FAILED: {e}")
+        return False
 
 def check_signal_status(high, low, current_bid=0, current_ask=0):
     """
-    Cek status trade.
-    Prioritas 1: Realtime Tick (Bid/Ask) -> Cepat buka kunci.
-    Prioritas 2: Candle High/Low -> Backup jika spike terlewat.
+    Status Check dengan Partial Tick Support (Bid/Ask Independent)
     """
     if not os.path.exists(FILE_PATH): return "NONE"
     
@@ -40,37 +42,37 @@ def check_signal_status(high, low, current_bid=0, current_ask=0):
         with open(FILE_PATH, "r") as f:
             state = json.load(f)
     except:
-        # Fail-Safe: Rename & Lock
         ts = int(time.time())
         try: os.rename(FILE_PATH, f"{FILE_PATH}.corrupt.{ts}")
         except: pass
-        return "STILL_OPEN"
+        return "STILL_OPEN" # Fail-safe lock
 
     if not state.get("active"): return "NONE"
-    if state.get("type") not in ["BUY", "SELL"]: return "NONE"
-    if not state.get("sl") or not state.get("tp"): return "STILL_OPEN"
-
+    
     # --- EXPIRY CHECK ---
     if int(time.time()) - state.get("opened_at_wall_ts", 0) > 14400:
         return "EXPIRED"
 
-    sl = state["sl"]
-    tp = state["tp"]
-    stype = state["type"]
+    sl = state.get("sl", 0)
+    tp = state.get("tp", 0)
+    stype = state.get("type")
 
-    # --- 1. REALTIME CHECK (Fast Unlock) ---
-    if current_bid > 0 and current_ask > 0:
-        if stype == "BUY":
-            # Buy Exit: TP di Bid, SL di Bid (Simplifikasi aman)
+    if not sl or not tp: return "STILL_OPEN" # Guard data kosong
+
+    # --- 1. REALTIME CHECK (PARTIAL TICK) ---
+    if stype == "BUY":
+        # Buy Exit butuh BID (Harga jual kita)
+        if current_bid > 0:
             if current_bid >= tp: return "TP_HIT"
             if current_bid <= sl: return "SL_HIT"
-        elif stype == "SELL":
-            # Sell Exit: TP di Ask, SL di Ask
+            
+    elif stype == "SELL":
+        # Sell Exit butuh ASK (Harga beli kita)
+        if current_ask > 0:
             if current_ask <= tp: return "TP_HIT"
             if current_ask >= sl: return "SL_HIT"
 
-    # --- 2. CANDLE CHECK (Backup / Audit) ---
-    # Cek apakah High/Low candle menyentuh harga
+    # --- 2. CANDLE CHECK (Backup) ---
     if stype == "BUY":
         if high >= tp: return "TP_HIT"
         if low <= sl: return "SL_HIT"
